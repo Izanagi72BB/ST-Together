@@ -30,7 +30,7 @@ function getCtx() {
 function settings() {
     const ctx = getCtx();
     ctx.extensionSettings[MOD] = Object.assign(
-        { role: 'host', port: DEFAULT_PORT, autoPass: false, tunnel: false, lastInvite: '' },
+        { role: 'guest', port: DEFAULT_PORT, autoPass: false, tunnel: false, lastInvite: '' },
         ctx.extensionSettings[MOD] ?? {},
     );
     return ctx.extensionSettings[MOD];
