@@ -25,10 +25,17 @@ const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
 const HEARTBEAT_MS = 30000;
 const TUNNEL_TIMEOUT_MS = 45000;
-const CLOUDFLARED_URL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64';
 
 const moduleDir = path.dirname(url.fileURLToPath(import.meta.url));
-const localCloudflared = path.join(moduleDir, 'cloudflared');
+const localCloudflared = path.join(moduleDir, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+
+// Standalone binaries only; macOS releases ship as archives, so Mac hosts
+// need a system install (brew install cloudflared) instead.
+function cloudflaredAssetName() {
+    if (process.platform === 'win32') return 'cloudflared-windows-amd64.exe';
+    if (process.platform === 'linux') return process.arch === 'arm64' ? 'cloudflared-linux-arm64' : 'cloudflared-linux-amd64';
+    return null;
+}
 
 let wss = null;
 let session = null;
@@ -75,8 +82,12 @@ function setTurn(holder, reason) {
 async function findCloudflared() {
     if (commandExistsSync('cloudflared')) return 'cloudflared';
     if (fs.existsSync(localCloudflared)) return localCloudflared;
+    const asset = cloudflaredAssetName();
+    if (!asset) {
+        throw new Error('cloudflared is not installed. Install it (on macOS: brew install cloudflared) and restart SillyTavern.');
+    }
     console.log('[ST-Together] cloudflared not found, downloading to plugin folder ...');
-    const response = await fetch(CLOUDFLARED_URL, { redirect: 'follow' });
+    const response = await fetch(`https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`, { redirect: 'follow' });
     if (!response.ok) throw new Error(`cloudflared download failed: HTTP ${response.status}`);
     const buffer = Buffer.from(await response.arrayBuffer());
     fs.writeFileSync(localCloudflared, buffer, { mode: 0o755 });

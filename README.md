@@ -23,21 +23,57 @@ extension.
 
 ## Install: host
 
-1. In SillyTavern, go to Extensions, Install extension, and paste this
-   repository URL. This installs the UI extension.
-2. Clone this same repository into your SillyTavern `plugins/` folder
-   (one-time; from your SillyTavern folder):
+The host needs two parts: the UI extension (installed from inside
+SillyTavern) and the server plugin (installed with one command in a
+terminal, one time only).
+
+### Part 1: the UI extension
+
+1. In SillyTavern, open the Extensions panel (the stacked-blocks icon in
+   the top bar).
+2. Click **Install extension**.
+3. Paste `https://github.com/Izanagi72BB/ST-Together` and confirm.
+
+### Part 2: the server plugin
+
+1. Find your SillyTavern folder. It is the folder that contains
+   `config.yaml`, and `Start.bat` on Windows or `start.sh` on Linux/Mac.
+   If you use the SillyTavern Launcher, it is the `SillyTavern` folder
+   inside the launcher's folder.
+
+2. Open a terminal **inside that folder**. This matters: the command in
+   step 3 creates the plugin folder relative to wherever your terminal is
+   standing, so running it from the wrong place puts the plugin in the
+   wrong place. (If that happens, delete the stray `plugins` folder it
+   created and start over from here.)
+
+   - **Windows:** open the SillyTavern folder in File Explorer, click the
+     address bar at the top, type `cmd`, and press Enter. A terminal opens
+     already inside the folder.
+   - **Linux/Mac:** `cd /path/to/your/SillyTavern` (the prompt should show
+     the SillyTavern folder before you continue).
+
+3. Run this command (identical on every OS):
 
    ```
    git clone https://github.com/Izanagi72BB/ST-Together plugins/st-together
    ```
 
-3. Set `enableServerPlugins: true` in SillyTavern's `config.yaml`.
-4. Restart SillyTavern.
+   Windows note: if you get "git is not recognized", install
+   [Git for Windows](https://git-scm.com/download/win) first, then reopen
+   the terminal.
 
-Updates afterwards are automatic or one click: SillyTavern pulls the
-plugin on every server start, and the UI extension updates from the
-Update button under Manage extensions.
+4. Open `config.yaml` (same folder) in any text editor, find the line
+   `enableServerPlugins: false`, and change `false` to `true`.
+
+5. Restart SillyTavern fully (close the server window / process and start
+   it again, not just a browser refresh).
+
+### Updating later
+
+Automatic or one click: SillyTavern re-pulls the server plugin on every
+server start, and the UI extension updates from the **Update** button
+under Manage extensions. You never repeat the steps above.
 
 The tunnel uses `cloudflared`. If it is installed system-wide the plugin
 uses that; otherwise the plugin downloads the binary into its own folder
