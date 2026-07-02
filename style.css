@@ -1,0 +1,130 @@
+.stg-hidden {
+    display: none !important;
+}
+
+/* --- action bar above the input --- */
+#stg_bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    background-color: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.3));
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.1));
+    margin-bottom: 4px;
+    font-size: 0.85em;
+}
+
+#stg_bar #stg_turn_label {
+    opacity: 0.8;
+}
+
+#stg_bar.stg-my-turn #stg_turn_label {
+    opacity: 1;
+    font-weight: bold;
+}
+
+.stg-bar-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+.stg-bar-buttons .menu_button {
+    margin: 0;
+    padding: 2px 10px;
+    font-size: 0.9em;
+    width: auto;
+}
+
+.stg-bar-buttons .menu_button.disabled {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
+/* --- typing indicator bubble --- */
+#stg_typing {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+#stg_typing.stg-visible {
+    display: flex;
+}
+
+.stg-dots {
+    display: inline-flex;
+    gap: 3px;
+}
+
+.stg-dots span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background-color: currentColor;
+    animation: stg-bounce 1.2s infinite;
+}
+
+.stg-dots span:nth-child(2) {
+    animation-delay: 0.15s;
+}
+
+.stg-dots span:nth-child(3) {
+    animation-delay: 0.3s;
+}
+
+@keyframes stg-bounce {
+    0%, 60%, 100% {
+        transform: translateY(0);
+        opacity: 0.4;
+    }
+    30% {
+        transform: translateY(-4px);
+        opacity: 1;
+    }
+}
+
+/* --- guest-side streaming preview --- */
+#stg_stream {
+    margin: 5px 10px;
+    padding: 8px 12px;
+    border-left: 2px solid var(--SmartThemeQuoteColor, #888);
+    border-radius: 4px;
+    opacity: 0.85;
+}
+
+#stg_stream .stg-ghost-name {
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+#stg_stream .stg-ghost-text {
+    white-space: pre-wrap;
+}
+
+/* --- guest restrictions: swipes would trigger local generation, edits do not sync back --- */
+body.stg-guest-active .swipe_left,
+body.stg-guest-active .swipe_right,
+body.stg-guest-active .swipeRightBlock,
+body.stg-guest-active .mes_edit {
+    display: none !important;
+}
+
+/* --- settings panel --- */
+.stg-extension-settings .stg-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.stg-extension-settings .stg-row .text_pole {
+    flex-grow: 1;
+}
+
+.stg-extension-settings small {
+    opacity: 0.6;
+}
