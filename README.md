@@ -25,10 +25,19 @@ extension.
 
 1. In SillyTavern, go to Extensions, Install extension, and paste this
    repository URL. This installs the UI extension.
-2. Clone this same repository into your SillyTavern `plugins/` folder as
-   `plugins/st-together/`. This is the server plugin.
+2. Clone this same repository into your SillyTavern `plugins/` folder
+   (one-time; from your SillyTavern folder):
+
+   ```
+   git clone https://github.com/Izanagi72BB/ST-Together plugins/st-together
+   ```
+
 3. Set `enableServerPlugins: true` in SillyTavern's `config.yaml`.
 4. Restart SillyTavern.
+
+Updates afterwards are automatic or one click: SillyTavern pulls the
+plugin on every server start, and the UI extension updates from the
+Update button under Manage extensions.
 
 The tunnel uses `cloudflared`. If it is installed system-wide the plugin
 uses that; otherwise the plugin downloads the binary into its own folder

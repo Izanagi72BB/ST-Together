@@ -1,6 +1,6 @@
 {
     "name": "st-together",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Turn-based multiplayer for SillyTavern: two ST instances, one shared chat.",
     "type": "module",
     "main": "index.mjs"

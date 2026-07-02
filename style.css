@@ -115,6 +115,24 @@ body.stg-guest-active .mes_edit {
 }
 
 /* --- settings panel --- */
+.stg-warn {
+    margin: 6px 0;
+    padding: 6px 10px;
+    border-left: 3px solid #d9a521;
+    font-size: 0.85em;
+    opacity: 0.85;
+}
+
+.stg-link {
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.stg-extension-settings .menu_button.disabled {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
 .stg-extension-settings .stg-row {
     display: flex;
     gap: 6px;

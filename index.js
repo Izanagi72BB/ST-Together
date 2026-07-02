@@ -605,7 +605,40 @@ function parseInvite(raw) {
     return { url: addr, token };
 }
 
+async function pluginAvailable() {
+    try {
+        const response = await fetch('/api/plugins/st-together/status', {
+            headers: getCtx().getRequestHeaders(),
+        });
+        return response.ok;
+    } catch {
+        return false;
+    }
+}
+
+async function refreshPluginGate() {
+    const ok = await pluginAvailable();
+    const hostRadio = document.querySelector('input[name="stg_role"][value="host"]');
+    const warn = document.getElementById('stg_plugin_warn');
+    if (!hostRadio || !warn) return ok;
+    hostRadio.disabled = !ok;
+    warn.classList.toggle('stg-hidden', ok);
+    document.getElementById('stg_start')?.classList.toggle('disabled', !ok);
+    if (!ok && document.querySelector('input[name="stg_role"][value="host"]').checked) {
+        // Show the guest view without overwriting the saved role preference.
+        document.querySelector('input[name="stg_role"][value="guest"]').checked = true;
+        $('#stg_host_block').addClass('stg-hidden');
+        $('#stg_guest_block').removeClass('stg-hidden');
+    }
+    return ok;
+}
+
 async function hostStart() {
+    if (!await pluginAvailable()) {
+        toast('error', 'The ST-Together server plugin is not responding. Host mode needs it installed and enableServerPlugins: true.');
+        refreshPluginGate();
+        return;
+    }
     const ctx = getCtx();
     const s = settings();
     const port = Number(document.getElementById('stg_port').value) || DEFAULT_PORT;
@@ -685,6 +718,13 @@ function injectSettingsPanel() {
             <div class="inline-drawer-content">
                 <label class="checkbox_label"><input type="radio" name="stg_role" value="host" ${s.role === 'host' ? 'checked' : ''}> Host (chat lives on this PC)</label>
                 <label class="checkbox_label"><input type="radio" name="stg_role" value="guest" ${s.role === 'guest' ? 'checked' : ''}> Join (connect to a host)</label>
+                <div id="stg_plugin_warn" class="stg-hidden stg-warn">
+                    Host mode is unavailable: the ST-Together server plugin is not responding.
+                    Clone this repo into SillyTavern's <code>plugins/st-together</code> folder, set
+                    <code>enableServerPlugins: true</code> in config.yaml, and restart SillyTavern.
+                    Joining someone else's session works without it.
+                    <span id="stg_recheck" class="stg-link">Recheck</span>
+                </div>
                 <hr>
                 <div id="stg_host_block" class="${s.role === 'host' ? '' : 'stg-hidden'}">
                     <label>Port <input id="stg_port" class="text_pole" type="number" min="1024" max="65535" value="${s.port}"></label>
@@ -734,6 +774,10 @@ function injectSettingsPanel() {
         const value = document.getElementById('stg_invite_out').value;
         if (value) navigator.clipboard.writeText(value).then(() => toast('success', 'Invite copied.'));
     });
+    $('#stg_recheck').on('click', async () => {
+        toast('info', await refreshPluginGate() ? 'Server plugin found.' : 'Still not responding.');
+    });
+    refreshPluginGate();
 }
 
 // -------------------------------------------------------------------- init
