@@ -24,6 +24,9 @@ extension.
 - Turns are fluid: the turn holder can write (the bot replies), extend the
   bot's last message (Continue), have the bot speak again (Bot Reply), or
   hand over (Pass Turn). Optionally the turn can auto-pass after each reply.
+- Either player can propose a swipe with **Vote Swipe**. The other player
+  gets an Agree/Disagree prompt, and only on agreement does the bot's last
+  response get regenerated, so you re-roll cooperatively.
 - Drafts are private. Only a boolean "is typing" signal leaves your machine,
   shown to the other player as a "X is writing" indicator with bouncing dots.
   The bot's reply streams live to both players.
@@ -139,7 +142,7 @@ use.
    **Join** in the ST-Together drawer, paste the invite, and click **Join**.
    The host's chat syncs over automatically.
 4. Play. The action bar above the input shows whose turn it is and holds the
-   **Continue**, **Bot Reply**, and **Pass Turn** buttons. In the screenshot
+   **Vote Swipe**, **Continue**, **Bot Reply**, and **Pass Turn** buttons. In the screenshot
    at the top of this page, the host (left) has the turn while the guest
    (right) is locked with "Waiting: User's turn".
 

@@ -219,6 +219,7 @@ function connect(url, token, role) {
         state.turnHolder = null;
         document.body.classList.remove('stg-guest-active');
         hideTyping();
+        hideVotePrompt();
         removeGhost();
         applyTurnUI();
         setStatus(event.reason ? `Disconnected: ${event.reason}` : 'Disconnected.');
@@ -242,6 +243,7 @@ function disconnect() {
     state.turnHolder = null;
     document.body.classList.remove('stg-guest-active');
     hideTyping();
+    hideVotePrompt();
     removeGhost();
     applyTurnUI();
 }
@@ -322,6 +324,18 @@ function onFrame(frame) {
             applyTurnUI();
             return;
         }
+        case 'vote': {
+            if (frame.kind === 'request') {
+                showVotePrompt(frame.name);
+            } else if (frame.kind === 'passed') {
+                hideVotePrompt();
+                toast('info', 'Swiping the response...');
+            } else if (frame.kind === 'failed') {
+                hideVotePrompt();
+                toast('info', `${frame.name ?? 'The other player'} kept the response.`);
+            }
+            return;
+        }
         case 'error': {
             const messages = {
                 'not-your-turn': 'Not your turn.',
@@ -330,6 +344,7 @@ function onFrame(frame) {
                 'host-taken': 'A host is already connected.',
                 'room-full': 'Session is full.',
                 'host-away': 'Host is in another chat right now.',
+                'no-peer': 'No one else is here to vote.',
             };
             toast('warning', messages[frame.code] ?? frame.msg ?? frame.code);
             return;
@@ -647,6 +662,14 @@ async function onExec(frame) {
             await ctx.generate('continue');
         } else if (frame.kind === 'botreply') {
             await ctx.generate('normal');
+        } else if (frame.kind === 'swipe') {
+            const last = ctx.chat.at(-1);
+            if (!last || last.is_user || last.is_system) {
+                toast('warning', 'Nothing to swipe.');
+                wsSend({ t: 'gen.abort' });
+                return;
+            }
+            await ctx.generate('swipe');
         }
     } catch (error) {
         console.error(`[${MOD}] exec failed`, error);
@@ -807,6 +830,17 @@ function hookTyping() {
     }, true);
 }
 
+function showVotePrompt(name) {
+    const el = document.getElementById('stg_vote_prompt');
+    if (!el) return;
+    document.getElementById('stg_vote_text').textContent = `${name} wants to swipe this response`;
+    el.classList.remove('stg-hidden');
+}
+
+function hideVotePrompt() {
+    document.getElementById('stg_vote_prompt')?.classList.add('stg-hidden');
+}
+
 function showTyping(name) {
     const el = document.getElementById('stg_typing');
     if (!el) return;
@@ -890,9 +924,15 @@ function injectActionBar() {
     bar.innerHTML = `
         <span id="stg_turn_label"></span>
         <div class="stg-bar-buttons">
+            <div id="stg_voteswipe" class="menu_button" title="Ask the other player to swipe (regenerate) the last response">Vote Swipe</div>
             <div id="stg_continue" class="menu_button" title="Extend the bot's last message">Continue</div>
             <div id="stg_botreply" class="menu_button" title="Bot speaks again without a new message">Bot Reply</div>
             <div id="stg_pass" class="menu_button" title="Hand the turn to the other player">Pass Turn</div>
+        </div>
+        <div id="stg_vote_prompt" class="stg-hidden stg-vote-prompt">
+            <span id="stg_vote_text"></span>
+            <div id="stg_vote_agree" class="menu_button">Agree</div>
+            <div id="stg_vote_disagree" class="menu_button">Disagree</div>
         </div>`;
     formSheld.prepend(bar);
 
@@ -903,6 +943,21 @@ function injectActionBar() {
     document.getElementById('stg_continue').addEventListener('click', guarded('continue'));
     document.getElementById('stg_botreply').addEventListener('click', guarded('botreply'));
     document.getElementById('stg_pass').addEventListener('click', guarded('pass'));
+
+    // Vote-to-swipe is cooperative, so it is NOT turn-gated: either player can propose.
+    document.getElementById('stg_voteswipe').addEventListener('click', () => {
+        if (!state.connected) return;
+        wsSend({ t: 'vote', kind: 'request' });
+        toast('info', 'Vote sent. Waiting for the other player to agree.');
+    });
+    document.getElementById('stg_vote_agree').addEventListener('click', () => {
+        wsSend({ t: 'vote', kind: 'agree' });
+        hideVotePrompt();
+    });
+    document.getElementById('stg_vote_disagree').addEventListener('click', () => {
+        wsSend({ t: 'vote', kind: 'disagree' });
+        hideVotePrompt();
+    });
 
     const typing = document.createElement('div');
     typing.id = 'stg_typing';

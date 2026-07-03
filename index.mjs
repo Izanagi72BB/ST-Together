@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.2.4';
+const VERSION = '0.3.0';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -311,6 +311,32 @@ function onFrame(ws, raw) {
             send(h, { t: 'snapshot.req', reqId });
             return;
         }
+        case 'vote': {
+            // Cooperative swipe: one player proposes, another must agree, then
+            // the host regenerates the last response.
+            if (msg.kind === 'request') {
+                const others = authedClients().filter(c => c !== ws);
+                if (!others.length) return send(ws, { t: 'error', code: 'no-peer', msg: 'No one else is here to vote.' });
+                session.swipeVote = { byWs: ws };
+                for (const c of others) send(c, { t: 'vote', kind: 'request', name: meta.name });
+                return;
+            }
+            if (!session.swipeVote) return;
+            if (msg.kind === 'agree') {
+                if (ws === session.swipeVote.byWs) return; // can't agree with yourself
+                session.swipeVote = null;
+                broadcast({ t: 'vote', kind: 'passed' });
+                const h = hostClient();
+                if (h) send(h, { t: 'exec', kind: 'swipe' });
+                return;
+            }
+            if (msg.kind === 'disagree' || msg.kind === 'cancel') {
+                session.swipeVote = null;
+                broadcast({ t: 'vote', kind: 'failed', name: meta.name });
+                return;
+            }
+            return;
+        }
         case 'typing': {
             broadcast({ t: 'typing', name: meta.name, role: meta.role, active: !!msg.active }, ws);
             return;
@@ -335,6 +361,10 @@ wss.on('connection', (ws) => {
         }
     });
     ws.on('close', () => {
+        if (session?.swipeVote?.byWs === ws) {
+            session.swipeVote = null;
+            broadcast({ t: 'vote', kind: 'failed', name: ws.meta.name });
+        }
         if (ws.meta.authed) {
             broadcast({ t: 'peer', name: ws.meta.name, role: ws.meta.role, online: false }, ws);
         }
