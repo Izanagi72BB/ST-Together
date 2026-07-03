@@ -50,7 +50,10 @@ function getCtx() {
 function settings() {
     const ctx = getCtx();
     ctx.extensionSettings[MOD] = Object.assign(
-        { role: 'guest', autoPass: false, tunnel: true, announcePlayers: true, sharePersonaDesc: true, lastInvite: '' },
+        {
+            role: 'guest', autoPass: false, tunnel: true, announcePlayers: true, sharePersonaDesc: true,
+            participantsTemplate: '', participantsPosition: 1, participantsDepth: 4, lastInvite: '',
+        },
         ctx.extensionSettings[MOD] ?? {},
     );
     return ctx.extensionSettings[MOD];
@@ -428,6 +431,28 @@ async function ensureRemoteAvatar(card) {
 // ------------------------------------------------------------- personas
 
 const PARTICIPANTS_KEY = 'ST_TOGETHER_PARTICIPANTS';
+const DEFAULT_PARTICIPANTS_TEMPLATE =
+`[Multiplayer scene: more than one person is taking part in this chat, each playing their own character. Treat them as distinct individuals and address them by name when it fits. Participants:
+{{participants}}
+Every user message is labelled with its sender's name; respond to whoever spoke most recently while staying aware of everyone present.]`;
+
+function participantsSettings() {
+    const s = settings();
+    return {
+        template: (s.participantsTemplate ?? '').trim() || DEFAULT_PARTICIPANTS_TEMPLATE,
+        position: Number.isFinite(s.participantsPosition) ? s.participantsPosition : 1,
+        depth: Number.isFinite(s.participantsDepth) ? s.participantsDepth : 4,
+    };
+}
+
+// Build the exact text that gets injected, given the current roster.
+function renderParticipantsPrompt() {
+    const host = currentPersona();
+    const guests = Object.values(state.personas);
+    const line = (p) => `- ${p.name}${p.description ? `: ${p.description}` : ''}`;
+    const roster = [host, ...guests].map(line).join('\n');
+    return participantsSettings().template.replace('{{participants}}', roster);
+}
 
 function currentPersona() {
     const ctx = getCtx();
@@ -454,21 +479,35 @@ function updateParticipantsPrompt() {
     if (typeof ctx.setExtensionPrompt !== 'function') return;
     const s = settings();
     const guests = Object.values(state.personas);
+    const cfg = participantsSettings();
     if (state.role !== 'host' || !state.connected || !s.announcePlayers || guests.length === 0) {
-        ctx.setExtensionPrompt(PARTICIPANTS_KEY, '', 1, 4, false, 0);
-        return;
+        ctx.setExtensionPrompt(PARTICIPANTS_KEY, '', cfg.position, cfg.depth, false, 0);
+    } else {
+        ctx.setExtensionPrompt(PARTICIPANTS_KEY, renderParticipantsPrompt(), cfg.position, cfg.depth, false, 0);
     }
-    const host = currentPersona();
-    const line = (p) => `- ${p.name}${p.description ? `: ${p.description}` : ''}`;
-    const roster = [host, ...guests].map(line).join('\n');
-    const text = `[Multiplayer scene: more than one person is taking part in this chat, each playing their own character. Treat them as distinct individuals and address them by name when it fits. Participants:\n${roster}\nEvery user message is labelled with its sender's name; respond to whoever spoke most recently while staying aware of everyone present.]`;
-    ctx.setExtensionPrompt(PARTICIPANTS_KEY, text, 1, 4, false, 0);
+    refreshParticipantsPreview();
 }
 
 function clearParticipantsPrompt() {
     const ctx = getCtx();
     if (typeof ctx.setExtensionPrompt === 'function') {
-        ctx.setExtensionPrompt(PARTICIPANTS_KEY, '', 1, 4, false, 0);
+        const cfg = participantsSettings();
+        ctx.setExtensionPrompt(PARTICIPANTS_KEY, '', cfg.position, cfg.depth, false, 0);
+    }
+}
+
+// Advanced panel: show the exact text and location the AI receives right now.
+function refreshParticipantsPreview() {
+    const el = document.getElementById('stg_participants_preview');
+    if (!el) return;
+    const cfg = participantsSettings();
+    const where = cfg.position === 0 ? 'top of the prompt' : `in-chat at depth ${cfg.depth}`;
+    const hasGuests = Object.values(state.personas).length > 0;
+    if (state.role === 'host' && state.connected && hasGuests) {
+        el.value = `Injected as a system note, ${where}:\n\n${renderParticipantsPrompt()}`;
+    } else {
+        const roster = `${getCtx().name1 || 'You'}: (your persona)\n- (each guest appears here once they join)`;
+        el.value = `Not active right now (needs a connected guest). Preview with sample roster, ${where}:\n\n${participantsSettings().template.replace('{{participants}}', roster)}`;
     }
 }
 
@@ -1185,11 +1224,40 @@ function injectSettingsPanel() {
                 </div>
                 <hr>
                 <div id="stg_host_block" class="${s.role === 'host' ? '' : 'stg-hidden'}">
-                    <label class="checkbox_label"><input id="stg_autopass" type="checkbox" ${s.autoPass ? 'checked' : ''}> Auto-pass turn after bot reply</label>
-                    <label class="checkbox_label"><input id="stg_announce" type="checkbox" ${s.announcePlayers ? 'checked' : ''}> Tell the AI there are multiple players (share personas so it addresses each by name)</label>
-                    <div class="stg-tunnel-row">
+                    <div class="stg-setting">
+                        <label class="checkbox_label"><input id="stg_autopass" type="checkbox" ${s.autoPass ? 'checked' : ''}> Auto-pass turn after bot reply</label>
+                        <div class="stg-subtext">Hands the turn back automatically after each bot reply, instead of keeping it until you press Pass Turn.</div>
+                    </div>
+                    <div class="stg-setting">
+                        <label class="checkbox_label"><input id="stg_announce" type="checkbox" ${s.announcePlayers ? 'checked' : ''}> Tell the AI there are multiple players</label>
+                        <div class="stg-subtext">Shares each player's persona so the character treats you as distinct people and can address you by name.</div>
+                        <div class="stg-advanced">
+                            <div id="stg_adv_toggle" class="stg-advanced-toggle"><span class="stg-adv-caret">▸</span> Advanced: view &amp; edit the exact prompt</div>
+                            <div id="stg_adv_body" class="stg-advanced-body stg-hidden">
+                                <label>Prompt template <span class="stg-subtext-inline">— <code>{{participants}}</code> is replaced with the player list</span>
+                                    <textarea id="stg_participants_template" class="text_pole" rows="6">${(s.participantsTemplate || DEFAULT_PARTICIPANTS_TEMPLATE).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</textarea>
+                                </label>
+                                <div class="stg-row">
+                                    <label>Inject
+                                        <select id="stg_participants_position" class="text_pole">
+                                            <option value="1" ${s.participantsPosition !== 0 ? 'selected' : ''}>in chat, at depth</option>
+                                            <option value="0" ${s.participantsPosition === 0 ? 'selected' : ''}>at top of prompt</option>
+                                        </select>
+                                    </label>
+                                    <label id="stg_depth_wrap">Depth
+                                        <input id="stg_participants_depth" class="text_pole" type="number" min="0" max="100" value="${Number.isFinite(s.participantsDepth) ? s.participantsDepth : 4}">
+                                    </label>
+                                    <div id="stg_participants_reset" class="menu_button" title="Restore the default prompt">Reset</div>
+                                </div>
+                                <label>Live preview <span class="stg-subtext-inline">— exactly what the AI receives</span>
+                                    <textarea id="stg_participants_preview" class="text_pole" rows="7" readonly></textarea>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stg-setting">
                         <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Use a temporary public link so friends outside your network can join</label>
-                        <a href="https://github.com/Izanagi72BB/ST-Together#how-the-temporary-link-works" target="_blank" rel="noopener" class="stg-help" title="How this works and why it's safe">(?)</a>
+                        <div class="stg-subtext">Creates a throwaway address so someone off your network can reach this session. <a href="https://github.com/Izanagi72BB/ST-Together#how-the-temporary-link-works" target="_blank" rel="noopener" class="stg-inline-link">How it works &amp; is it safe? ↗</a></div>
                     </div>
                     <div class="stg-row">
                         <div id="stg_start" class="menu_button">Start Session</div>
@@ -1201,7 +1269,7 @@ function injectSettingsPanel() {
                             <div id="stg_copy" class="menu_button" title="Copy invite">Copy</div>
                         </div>
                     </label>
-                    <small>Leave this on unless your SillyTavern already has its own public address. The link is temporary and closes when you stop the session.</small>
+                    <div class="stg-subtext">Leave the public link on unless your SillyTavern already has its own public address.</div>
                 </div>
                 <div id="stg_guest_block" class="${s.role === 'guest' ? '' : 'stg-hidden'}">
                     <label>Invite code
@@ -1236,6 +1304,41 @@ function injectSettingsPanel() {
         saveSettings();
         updateParticipantsPrompt();
     });
+    $('#stg_adv_toggle').on('click', () => {
+        const body = document.getElementById('stg_adv_body');
+        const open = body.classList.toggle('stg-hidden');
+        document.querySelector('.stg-adv-caret').textContent = open ? '▸' : '▾';
+        if (!open) refreshParticipantsPreview();
+    });
+    $('#stg_participants_template').on('input', function () {
+        settings().participantsTemplate = this.value;
+        saveSettings();
+        updateParticipantsPrompt();
+    });
+    const syncDepthVisibility = () => {
+        const pos = Number(document.getElementById('stg_participants_position').value);
+        document.getElementById('stg_depth_wrap').classList.toggle('stg-hidden', pos === 0);
+    };
+    $('#stg_participants_position').on('change', function () {
+        settings().participantsPosition = Number(this.value);
+        saveSettings();
+        syncDepthVisibility();
+        updateParticipantsPrompt();
+    });
+    $('#stg_participants_depth').on('input', function () {
+        settings().participantsDepth = Number(this.value) || 0;
+        saveSettings();
+        updateParticipantsPrompt();
+    });
+    $('#stg_participants_reset').on('click', () => {
+        settings().participantsTemplate = '';
+        saveSettings();
+        document.getElementById('stg_participants_template').value = DEFAULT_PARTICIPANTS_TEMPLATE;
+        updateParticipantsPrompt();
+        toast('info', 'Prompt reset to default.');
+    });
+    syncDepthVisibility();
+    refreshParticipantsPreview();
     $('#stg_sharepersona').on('change', function () {
         settings().sharePersonaDesc = this.checked;
         saveSettings();
