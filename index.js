@@ -121,8 +121,7 @@ function ensureUid(mes) {
     return mes.extra.stg_uid;
 }
 
-async function pushMessage({ name, text, isUser, uid, sendDate, remote = false, save = true }) {
-    const ctx = getCtx();
+function buildMessage({ name, text, isUser, uid, sendDate, remote = false }) {
     const mes = {
         name: name,
         is_user: !!isUser,
@@ -135,9 +134,15 @@ async function pushMessage({ name, text, isUser, uid, sendDate, remote = false, 
     if (!mes.is_user && state.remoteAvatars[mes.name]) {
         mes.force_avatar = state.remoteAvatars[mes.name];
     }
+    return mes;
+}
+
+async function pushMessage(opts) {
+    const ctx = getCtx();
+    const mes = buildMessage(opts);
     ctx.chat.push(mes);
     ctx.addOneMessage(mes);
-    if (save) await ctx.saveChat();
+    if (opts.save !== false) await ctx.saveChat();
     return mes;
 }
 
@@ -383,6 +388,28 @@ async function applySnapshot(frame) {
     state.mirrorChatId = ctx.getCurrentChatId?.() ?? null;
     await ensureRemoteAvatar(frame.botAvatar);
     const snapshot = frame.messages ?? [];
+
+    // Fresh snapshot = the shared chat changed entirely. Replace the whole
+    // mirror, including any untagged local messages (e.g. the guest's own
+    // welcome-screen assistant hint) that a partial reconcile would leave
+    // stranded at the top.
+    if (frame.fresh) {
+        ctx.chat.length = 0;
+        for (const m of snapshot) {
+            ctx.chat.push(buildMessage({
+                name: m.name, text: m.text, isUser: m.isUser,
+                uid: m.uid, sendDate: m.sendDate, remote: true,
+            }));
+        }
+        await ctx.saveChat();
+        await redrawChat();
+        applyTurnUI();
+        toast('success', snapshot.length
+            ? `Now mirroring the shared chat (${snapshot.length} message(s)).`
+            : 'Connected. Waiting for the host to share a chat.');
+        return;
+    }
+
     const snapshotUids = new Set(snapshot.map(m => m.uid));
     let added = 0, updated = 0, removed = 0;
 
@@ -451,15 +478,17 @@ function buildSnapshotMessages() {
 async function answerSnapshot(frame) {
     if (state.role !== 'host') return;
     const ctx = getCtx();
+    // A snapshot reply (join or resume) is a full mirror replace, so mark it
+    // fresh: the guest wipes its local view, including its own welcome hint.
     if (state.sharePaused) {
         // Not in the shared chat; answer empty so the guest is not fed the wrong chat.
-        wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: '', messages: [] });
+        wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: '', messages: [], fresh: true });
         return;
     }
     const messages = buildSnapshotMessages();
     try { await ctx.saveChat(); } catch { /* nothing saveable (welcome screen) */ }
     const botAvatar = await getBotAvatarB64();
-    wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: ctx.getCurrentChatId?.() ?? '', messages, botAvatar });
+    wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: ctx.getCurrentChatId?.() ?? '', messages, botAvatar, fresh: true });
 }
 
 let resyncTimer = null;
