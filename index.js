@@ -42,6 +42,9 @@ const state = {
     suppressChatPrompt: false,
     personas: {},           // host: guest name -> { name, description }
     myAvatarSent: false,    // have we shared this player's persona avatar yet
+    turnMode: 'reply',      // 'reply' | 'round' | 'free'
+    roundSent: new Set(),   // host, round mode: which roles have sent this round
+    lastGenType: null,      // host: type of the in-flight generation
 };
 
 function getCtx() {
@@ -53,7 +56,7 @@ function settings() {
     ctx.extensionSettings[MOD] = Object.assign(
         {
             role: 'guest', autoPass: false, tunnel: true, announcePlayers: true, sharePersonaDesc: true,
-            participantsTemplate: '', participantsPosition: 1, participantsDepth: 4, lastInvite: '',
+            turnMode: 'reply', participantsTemplate: '', participantsPosition: 1, participantsDepth: 4, lastInvite: '',
         },
         ctx.extensionSettings[MOD] ?? {},
     );
@@ -273,6 +276,8 @@ function onFrame(frame) {
             state.mirrorPaused = false;
             state.personas = {};
             state.myAvatarSent = false;
+            state.roundSent.clear();
+            if (frame.mode) state.turnMode = frame.mode;
             const currentChat = getCtx().getCurrentChatId?.() ?? null;
             if (frame.role === 'host') {
                 state.sharedChatId = currentChat;
@@ -354,15 +359,21 @@ function onFrame(frame) {
             if (frame.avatar) ensureRemoteAvatar(frame.avatar);
             return;
         }
+        case 'mode': {
+            state.turnMode = frame.mode || 'reply';
+            state.roundSent.clear();
+            applyTurnUI();
+            return;
+        }
         case 'vote': {
             if (frame.kind === 'request') {
-                showVotePrompt(frame.name);
+                showVotePrompt(frame.name, frame.for);
             } else if (frame.kind === 'passed') {
                 hideVotePrompt();
-                toast('info', 'Swiping the response...');
+                toast('info', frame.for === 'summon' ? 'Bringing the AI in...' : 'Swiping the response...');
             } else if (frame.kind === 'failed') {
                 hideVotePrompt();
-                toast('info', `${frame.name ?? 'The other player'} kept the response.`);
+                toast('info', `${frame.name ?? 'The other player'} voted no.`);
             }
             return;
         }
@@ -836,7 +847,13 @@ async function onExec(frame) {
                     uid: frame.uid, sendDate: frame.sendDate, remote: true,
                 });
             }
-            await ctx.generate('normal');
+            // Only "reply" mode auto-generates on every message; round/free
+            // let the turn logic (or a summon vote) decide.
+            if (state.turnMode === 'reply') {
+                await ctx.generate('normal');
+            } else {
+                onHostUserMessage('guest');
+            }
         } else if (frame.kind === 'continue') {
             await ctx.generate('continue');
         } else if (frame.kind === 'botreply') {
@@ -895,9 +912,10 @@ function hookHostEvents() {
         if (!state.myAvatarSent) sendPersona(); // now a rendered message exists; capture the avatar
     });
 
-    eventSource.on(eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => {
+    eventSource.on(eventTypes.GENERATION_STARTED, (type, _options, dryRun) => {
         if (!state.connected || state.role !== 'host' || state.sharePaused || dryRun) return;
         const ctx = getCtx();
+        state.lastGenType = type;
         // Refresh the participants note so the host's own persona is current
         // before the prompt is built.
         updateParticipantsPrompt();
@@ -923,6 +941,11 @@ function hookHostEvents() {
         }
         const uid = ensureUid(last);
         wsSend({ t: 'gen.end', uid, name: last.name, text: last.mes, sendDate: last.send_date });
+        // After a bot reply to a user, advance the turn per mode (free has none).
+        if (state.lastGenType === 'normal') {
+            if (state.turnMode === 'reply') hostSetTurn(state.turnHolder === 'host' ? 'guest' : 'host');
+            else if (state.turnMode === 'round') hostSetTurn('host');
+        }
     });
 
     eventSource.on(eventTypes.GENERATION_STOPPED, () => {
@@ -945,34 +968,77 @@ function hookHostEvents() {
 
 // -------------------------------------------------------------- guest send
 
-async function guestSend() {
-    const textarea = document.getElementById('send_textarea');
-    const text = (textarea?.value ?? '').trim();
-    if (!text) return;
+// Whether this player may send right now. Freeform has no turn lock.
+function canSend() {
+    if (state.role === 'guest' && state.hostAway) return false;
+    if (state.turnMode === 'free') return true;
+    return myTurn();
+}
+
+// Add a message locally and relay it, WITHOUT triggering the AI. Used for the
+// guest always, and for the host in modes where the AI does not auto-reply.
+async function localSend(text) {
+    const ctx = getCtx();
     const uid = crypto.randomUUID();
     const sendDate = nowString();
+    const name = ctx.name1 || 'You';
     sendTypingStop();
-    wsSend({ t: 'msg.user', uid, text, sendDate });
-    textarea.value = '';
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    await pushMessage({ name: getCtx().name1 || 'You', text, isUser: true, uid, sendDate });
-    if (!state.myAvatarSent) sendPersona(); // now a rendered message exists; capture the avatar
+    await pushMessage({ name, text, isUser: true, uid, sendDate });
+    if (state.role === 'guest') {
+        wsSend({ t: 'msg.user', uid, text, sendDate });
+    } else {
+        wsSend({ t: 'msg.user', uid, name, text, sendDate });
+        onHostUserMessage('host'); // host decides, per mode, whether the AI replies
+    }
+    if (!state.myAvatarSent) sendPersona();
+}
+
+function readAndClearTextarea() {
+    const textarea = document.getElementById('send_textarea');
+    const text = (textarea?.value ?? '').trim();
+    if (textarea) {
+        textarea.value = '';
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return text;
 }
 
 function interceptSend(event) {
     if (!state.connected) return;
-    if (!myTurn()) {
+    if (!canSend()) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        toast('warning', 'Not your turn.');
+        toast('warning', state.hostAway ? 'Host is in another chat.' : 'Not your turn.');
         return;
     }
-    if (state.role === 'guest') {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        guestSend();
+    // In "reply" mode the host uses ST's native send (which auto-generates).
+    // In every other case we add the message ourselves without generating.
+    if (state.turnMode === 'reply' && state.role === 'host') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const text = readAndClearTextarea();
+    if (text) localSend(text);
+}
+
+// Host-only: a user message just landed. Decide turns / generation per mode.
+function onHostUserMessage(sender) {
+    if (state.role !== 'host') return;
+    if (state.turnMode === 'round') {
+        state.roundSent.add(sender);
+        if (state.roundSent.size >= 2) {
+            state.roundSent.clear();
+            getCtx().generate('normal');
+        } else {
+            hostSetTurn(sender === 'host' ? 'guest' : 'host');
+        }
     }
-    // Host on their turn: let the native ST send flow run.
+    // 'reply' auto-generates on the guest side via onExec / native on the host;
+    // 'free' waits for a summon vote.
+}
+
+function hostSetTurn(holder) {
+    // The server echoes a 'turn' frame back to everyone, including us.
+    wsSend({ t: 'setturn', holder });
 }
 
 function hookSendInterception() {
@@ -991,7 +1057,7 @@ function hookSendInterception() {
 // ------------------------------------------------------- typing indicator
 
 function sendTypingStart() {
-    if (!state.connected || !myTurn()) return;
+    if (!state.connected || !canSend()) return;
     if (!state.typingActive) {
         state.typingActive = true;
         wsSend({ t: 'typing', active: true });
@@ -1016,10 +1082,11 @@ function hookTyping() {
     }, true);
 }
 
-function showVotePrompt(name) {
+function showVotePrompt(name, forWhat) {
     const el = document.getElementById('stg_vote_prompt');
     if (!el) return;
-    document.getElementById('stg_vote_text').textContent = `${name} wants to swipe this response`;
+    const what = forWhat === 'summon' ? 'bring the AI in' : 'swipe this response';
+    document.getElementById('stg_vote_text').textContent = `${name} wants to ${what}`;
     el.classList.remove('stg-hidden');
 }
 
@@ -1094,22 +1161,33 @@ function applyTurnUI() {
     }
 
     bar.classList.remove('stg-hidden');
+    const free = state.turnMode === 'free';
     const away = state.role === 'guest' && state.hostAway;
-    const mine = myTurn() && !away;
+    const mine = free ? !away : (myTurn() && !away);
+
     document.getElementById('stg_turn_label').textContent = away
         ? 'Paused: host is in another chat'
-        : mine
-            ? 'Your turn'
-            : `Waiting: ${state.peerName ?? 'other player'}'s turn`;
+        : free
+            ? 'Freeform: type anytime, Summon AI when ready'
+            : mine
+                ? 'Your turn'
+                : `Waiting: ${state.peerName ?? 'other player'}'s turn`;
     bar.classList.toggle('stg-my-turn', mine);
+
+    // Summon AI only makes sense in Freeform (other modes auto-reply);
+    // Pass Turn only in the turn-based modes.
+    document.getElementById('stg_summon')?.classList.toggle('stg-hidden', !free);
+    document.getElementById('stg_pass')?.classList.toggle('stg-hidden', free);
     for (const id of ['stg_continue', 'stg_botreply', 'stg_pass']) {
         document.getElementById(id)?.classList.toggle('disabled', !mine);
     }
+
     if (textarea) {
         textarea.disabled = !mine;
         textarea.placeholder = away
             ? 'Host is in another chat...'
-            : mine ? 'Your turn. Type a message...' : 'Waiting for the other player...';
+            : free ? 'Type anytime...'
+                : mine ? 'Your turn. Type a message...' : 'Waiting for the other player...';
     }
 }
 
@@ -1122,7 +1200,8 @@ function injectActionBar() {
     bar.innerHTML = `
         <span id="stg_turn_label"></span>
         <div class="stg-bar-buttons">
-            <div id="stg_voteswipe" class="menu_button" title="Ask the other player to swipe (regenerate) the last response">Vote Swipe</div>
+            <div id="stg_summon" class="menu_button" title="Vote to bring the AI in for a reply">Summon AI</div>
+            <div id="stg_voteswipe" class="menu_button" title="Vote to swipe (regenerate) the last response">Vote Swipe</div>
             <div id="stg_continue" class="menu_button" title="Extend the bot's last message">Continue</div>
             <div id="stg_botreply" class="menu_button" title="Bot speaks again without a new message">Bot Reply</div>
             <div id="stg_pass" class="menu_button" title="Hand the turn to the other player">Pass Turn</div>
@@ -1135,19 +1214,21 @@ function injectActionBar() {
     formSheld.prepend(bar);
 
     const guarded = (kind) => () => {
-        if (!myTurn()) return toast('warning', 'Not your turn.');
+        if (!myTurn() && state.turnMode !== 'free') return toast('warning', 'Not your turn.');
         wsSend({ t: 'action', kind });
     };
     document.getElementById('stg_continue').addEventListener('click', guarded('continue'));
     document.getElementById('stg_botreply').addEventListener('click', guarded('botreply'));
     document.getElementById('stg_pass').addEventListener('click', guarded('pass'));
 
-    // Vote-to-swipe is cooperative, so it is NOT turn-gated: either player can propose.
-    document.getElementById('stg_voteswipe').addEventListener('click', () => {
+    // Votes are cooperative, so NOT turn-gated: either player can propose.
+    const proposeVote = (forWhat, waitMsg) => () => {
         if (!state.connected) return;
-        wsSend({ t: 'vote', kind: 'request' });
-        toast('info', 'Vote sent. Waiting for the other player to agree.');
-    });
+        wsSend({ t: 'vote', kind: 'request', for: forWhat });
+        toast('info', waitMsg);
+    };
+    document.getElementById('stg_summon').addEventListener('click', proposeVote('summon', 'Vote sent. Waiting for the other player to bring the AI in.'));
+    document.getElementById('stg_voteswipe').addEventListener('click', proposeVote('swipe', 'Vote sent. Waiting for the other player to agree.'));
     document.getElementById('stg_vote_agree').addEventListener('click', () => {
         wsSend({ t: 'vote', kind: 'agree' });
         hideVotePrompt();
@@ -1220,17 +1301,18 @@ async function hostStart() {
     }
     const ctx = getCtx();
     const s = settings();
-    const autoPass = document.getElementById('stg_autopass').checked;
     const tunnel = document.getElementById('stg_tunnel').checked;
-    s.autoPass = autoPass;
+    const mode = document.getElementById('stg_mode')?.value || 'reply';
     s.tunnel = tunnel;
+    s.turnMode = mode;
+    state.turnMode = mode;
     saveSettings();
     setStatus(tunnel ? 'Starting session and Cloudflare tunnel (can take up to a minute on first run) ...' : 'Starting session ...');
     try {
         const response = await fetch('/api/plugins/st-together/start', {
             method: 'POST',
             headers: ctx.getRequestHeaders(),
-            body: JSON.stringify({ autoPass, tunnel }),
+            body: JSON.stringify({ tunnel, mode }),
         });
         const raw = await response.text();
         let data;
@@ -1304,8 +1386,14 @@ function injectSettingsPanel() {
                 <hr>
                 <div id="stg_host_block" class="${s.role === 'host' ? '' : 'stg-hidden'}">
                     <div class="stg-setting">
-                        <label class="checkbox_label"><input id="stg_autopass" type="checkbox" ${s.autoPass ? 'checked' : ''}> Auto-pass turn after bot reply</label>
-                        <div class="stg-subtext">Hands the turn back automatically after each bot reply, instead of keeping it until you press Pass Turn.</div>
+                        <label>Turn style
+                            <select id="stg_mode" class="text_pole">
+                                <option value="reply" ${s.turnMode === 'reply' ? 'selected' : ''}>Back-and-forth (AI replies to every message)</option>
+                                <option value="round" ${s.turnMode === 'round' ? 'selected' : ''}>Both respond, then the AI replies</option>
+                                <option value="free" ${s.turnMode === 'free' ? 'selected' : ''}>Freeform (chat freely, Summon the AI when ready)</option>
+                            </select>
+                        </label>
+                        <div class="stg-subtext">How turns work between the two of you, and when the AI steps in. You can change this mid-session.</div>
                     </div>
                     <div class="stg-setting">
                         <label class="checkbox_label"><input id="stg_announce" type="checkbox" ${s.announcePlayers ? 'checked' : ''}> Tell the AI there are multiple players</label>
@@ -1378,6 +1466,16 @@ function injectSettingsPanel() {
     });
     $('#stg_start').on('click', hostStart);
     $('#stg_stop').on('click', hostStop);
+    $('#stg_mode').on('change', function () {
+        settings().turnMode = this.value;
+        state.turnMode = this.value;
+        saveSettings();
+        if (state.connected && state.role === 'host') {
+            state.roundSent.clear();
+            wsSend({ t: 'mode', mode: this.value });
+            applyTurnUI();
+        }
+    });
     $('#stg_announce').on('change', function () {
         settings().announcePlayers = this.checked;
         saveSettings();

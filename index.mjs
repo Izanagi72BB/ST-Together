@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.4.4';
+const VERSION = '0.5.0';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -201,7 +201,7 @@ function onFrame(ws, raw) {
         meta.authed = true;
         meta.role = role;
         meta.name = String(msg.name || (role === 'host' ? 'Host' : 'Guest')).slice(0, 64);
-        send(ws, { t: 'welcome', role, turn: session.turnHolder, autoPass: session.autoPass, paused: session.paused });
+        send(ws, { t: 'welcome', role, turn: session.turnHolder, autoPass: session.autoPass, paused: session.paused, mode: session.mode });
         broadcast({ t: 'peer', name: meta.name, role, online: true }, ws);
         if (role === 'guest') {
             const h = hostClient();
@@ -250,18 +250,20 @@ function onFrame(ws, raw) {
                 if (session.paused) {
                     return send(ws, { t: 'error', code: 'host-away' });
                 }
-                if (session.turnHolder !== 'guest') {
+                // Freeform mode has no turn lock; other modes enforce it.
+                if (session.mode !== 'free' && session.turnHolder !== 'guest') {
                     return send(ws, { t: 'error', code: 'not-your-turn' });
                 }
                 const h = hostClient();
                 if (!h) return send(ws, { t: 'error', code: 'no-host' });
-                // Host executes it (inject + generate); other guests just render it.
+                // Host records it (and decides whether the AI replies, per mode);
+                // other guests just render it.
                 send(h, { ...frame, t: 'exec', kind: 'message' });
                 for (const g of guestClients()) {
                     if (g !== ws) send(g, frame);
                 }
             } else {
-                // Host wrote through the native ST flow; relay to guests.
+                // Host wrote it; relay to guests.
                 for (const g of guestClients()) send(g, frame);
             }
             return;
@@ -272,7 +274,7 @@ function onFrame(ws, raw) {
             if (meta.role === 'guest' && session.paused) {
                 return send(ws, { t: 'error', code: 'host-away' });
             }
-            if (session.turnHolder !== meta.role) {
+            if (session.mode !== 'free' && session.turnHolder !== meta.role) {
                 return send(ws, { t: 'error', code: 'not-your-turn' });
             }
             if (kind === 'pass') {
@@ -283,15 +285,25 @@ function onFrame(ws, raw) {
             send(h, { t: 'exec', kind });
             return;
         }
+        case 'setturn': {
+            // Host drives turn changes (per the active mode).
+            if (meta.role !== 'host') return;
+            return setTurn(msg.holder === 'guest' ? 'guest' : 'host', 'host');
+        }
+        case 'mode': {
+            if (meta.role !== 'host') return;
+            session.mode = ['reply', 'round', 'free'].includes(msg.mode) ? msg.mode : 'reply';
+            broadcast({ t: 'mode', mode: session.mode });
+            return;
+        }
         case 'gen.start':
         case 'gen.token':
         case 'gen.end':
         case 'gen.abort': {
+            // Host relays generation to guests. Turn changes are host-driven
+            // (via setturn), so the server no longer auto-passes here.
             if (meta.role !== 'host') return;
             for (const g of guestClients()) send(g, msg);
-            if (msg.t === 'gen.end' && session.autoPass) {
-                setTurn(otherRole(session.turnHolder), 'auto');
-            }
             return;
         }
         case 'share.paused': {
@@ -312,26 +324,29 @@ function onFrame(ws, raw) {
             return;
         }
         case 'vote': {
-            // Cooperative swipe: one player proposes, another must agree, then
-            // the host regenerates the last response.
+            // Cooperative vote: one player proposes an action ('swipe' to
+            // regenerate, or 'summon' to bring the AI in), another must agree,
+            // then the host runs it.
             if (msg.kind === 'request') {
+                const forWhat = ['swipe', 'summon'].includes(msg.for) ? msg.for : 'swipe';
                 const others = authedClients().filter(c => c !== ws);
                 if (!others.length) return send(ws, { t: 'error', code: 'no-peer', msg: 'No one else is here to vote.' });
-                session.swipeVote = { byWs: ws };
-                for (const c of others) send(c, { t: 'vote', kind: 'request', name: meta.name });
+                session.vote = { byWs: ws, for: forWhat };
+                for (const c of others) send(c, { t: 'vote', kind: 'request', name: meta.name, for: forWhat });
                 return;
             }
-            if (!session.swipeVote) return;
+            if (!session.vote) return;
             if (msg.kind === 'agree') {
-                if (ws === session.swipeVote.byWs) return; // can't agree with yourself
-                session.swipeVote = null;
-                broadcast({ t: 'vote', kind: 'passed' });
+                if (ws === session.vote.byWs) return; // can't agree with yourself
+                const forWhat = session.vote.for;
+                session.vote = null;
+                broadcast({ t: 'vote', kind: 'passed', for: forWhat });
                 const h = hostClient();
-                if (h) send(h, { t: 'exec', kind: 'swipe' });
+                if (h) send(h, { t: 'exec', kind: forWhat === 'summon' ? 'botreply' : 'swipe' });
                 return;
             }
             if (msg.kind === 'disagree' || msg.kind === 'cancel') {
-                session.swipeVote = null;
+                session.vote = null;
                 broadcast({ t: 'vote', kind: 'failed', name: meta.name });
                 return;
             }
@@ -379,8 +394,8 @@ wss.on('connection', (ws) => {
         }
     });
     ws.on('close', () => {
-        if (session?.swipeVote?.byWs === ws) {
-            session.swipeVote = null;
+        if (session?.vote?.byWs === ws) {
+            session.vote = null;
             broadcast({ t: 'vote', kind: 'failed', name: ws.meta.name });
         }
         if (ws.meta.authed) {
@@ -441,8 +456,9 @@ export async function init(router) {
             }
             const autoPass = !!req.body?.autoPass;
             const wantTunnel = !!req.body?.tunnel;
+            const mode = ['reply', 'round', 'free'].includes(req.body?.mode) ? req.body.mode : 'reply';
             const token = makeToken();
-            session = { token, autoPass, turnHolder: 'host', paused: false, pendingSnapshots: new Map(), tunnel: null };
+            session = { token, autoPass, mode, turnHolder: 'host', paused: false, pendingSnapshots: new Map(), tunnel: null };
             session.heartbeat = setInterval(() => {
                 for (const c of wss.clients) {
                     if (!c.meta?.alive) { c.terminate(); continue; }
@@ -499,6 +515,7 @@ export async function init(router) {
         res.json({
             active: true,
             version: VERSION,
+            mode: session.mode,
             turnHolder: session.turnHolder,
             autoPass: session.autoPass,
             tunnelUrl: session.tunnel?.url ?? null,
