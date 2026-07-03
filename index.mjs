@@ -1,9 +1,11 @@
 // ST-Together relay plugin (host side).
-// Owns the WebSocket session: token auth, turn referee, message routing,
-// and the optional trycloudflare quick tunnel for remote guests.
-// The UI extension (both roles) connects here as a WS client; only the
-// host role can execute LLM actions, so guest intents are forwarded to
-// the host client as 'exec' frames.
+// Serves a WebSocket on SillyTavern's OWN http server at
+// /api/plugins/st-together/ws, so it travels through the same origin, port,
+// and TLS as the rest of SillyTavern (works behind Cloudflare / a reverse
+// proxy). Owns token auth, the turn referee, message routing, and an
+// optional trycloudflare tunnel for hosts whose ST is not publicly exposed.
+// Only the host role can execute LLM actions, so guest intents are forwarded
+// to the host client as 'exec' frames.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -20,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const DEFAULT_PORT = 5138;
+const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
 const HEARTBEAT_MS = 30000;
@@ -37,7 +39,11 @@ function cloudflaredAssetName() {
     return null;
 }
 
-let wss = null;
+// One persistent WS server in "noServer" mode; upgrades are fed to it by the
+// handler we attach to ST's http server. Sessions come and go; this does not.
+const wss = new WebSocketServer({ noServer: true });
+let upgradeAttached = false;
+let httpServer = null;
 let session = null;
 
 function makeToken() {
@@ -51,7 +57,7 @@ function send(ws, obj) {
 }
 
 function authedClients() {
-    return wss ? [...wss.clients].filter(c => c.meta?.authed) : [];
+    return [...wss.clients].filter(c => c.meta?.authed);
 }
 
 function hostClient() {
@@ -159,6 +165,8 @@ function onFrame(ws, raw) {
         return send(ws, { t: 'error', code: 'bad-json' });
     }
     const meta = ws.meta;
+
+    if (!session) return ws.close(4004, 'no active session');
 
     if (!meta.authed) {
         if (msg.t !== 'hello') return ws.close(4001, 'hello required');
@@ -300,29 +308,44 @@ function onFrame(ws, raw) {
     }
 }
 
-function startServer(port) {
-    return new Promise((resolve, reject) => {
-        const server = new WebSocketServer({ host: '127.0.0.1', port });
-        server.on('listening', () => resolve(server));
-        server.on('error', reject);
-        server.on('connection', (ws) => {
-            ws.meta = { authed: false, role: null, name: null, alive: true };
-            ws.on('pong', () => { ws.meta.alive = true; });
-            ws.on('message', (raw) => {
-                try {
-                    onFrame(ws, raw);
-                } catch (error) {
-                    console.error('[ST-Together] frame error:', error);
-                }
-            });
-            ws.on('close', () => {
-                if (ws.meta.authed) {
-                    broadcast({ t: 'peer', name: ws.meta.name, role: ws.meta.role, online: false }, ws);
-                }
-            });
-            setTimeout(() => {
-                if (!ws.meta.authed && ws.readyState === 1) ws.close(4008, 'auth timeout');
-            }, AUTH_TIMEOUT_MS);
+wss.on('connection', (ws) => {
+    if (!session) return ws.close(4004, 'no active session');
+    ws.meta = { authed: false, role: null, name: null, alive: true };
+    ws.on('pong', () => { ws.meta.alive = true; });
+    ws.on('message', (raw) => {
+        try {
+            onFrame(ws, raw);
+        } catch (error) {
+            console.error('[ST-Together] frame error:', error);
+        }
+    });
+    ws.on('close', () => {
+        if (ws.meta.authed) {
+            broadcast({ t: 'peer', name: ws.meta.name, role: ws.meta.role, online: false }, ws);
+        }
+    });
+    setTimeout(() => {
+        if (!ws.meta.authed && ws.readyState === 1) ws.close(4008, 'auth timeout');
+    }, AUTH_TIMEOUT_MS);
+});
+
+// Attach our upgrade handler to ST's own http server exactly once. We only
+// claim upgrades to WS_PATH and leave every other path untouched, so this
+// coexists with anything else that might handle upgrades.
+function attachUpgrade(server) {
+    if (upgradeAttached || !server) return;
+    upgradeAttached = true;
+    httpServer = server;
+    server.on('upgrade', (request, socket, head) => {
+        let pathname;
+        try {
+            pathname = new URL(request.url, 'http://localhost').pathname;
+        } catch {
+            return;
+        }
+        if (pathname !== WS_PATH) return;
+        wss.handleUpgrade(request, socket, head, (ws) => {
+            wss.emit('connection', ws, request);
         });
     });
 }
@@ -333,32 +356,30 @@ function stopSession() {
         session.tunnel.proc.kill();
         session.tunnel = null;
     }
-    if (wss) {
-        for (const c of wss.clients) c.close(1001, 'session ended');
-        wss.close();
-    }
-    wss = null;
+    for (const c of wss.clients) c.close(1001, 'session ended');
     session = null;
 }
 
 export async function init(router) {
     router.use(express.json());
+    // Grab ST's http server from the first request so we can serve the WS on it.
+    router.use((req, _res, next) => {
+        attachUpgrade(req.socket.server);
+        next();
+    });
 
     router.post('/start', async (req, res) => {
         try {
             if (session) {
-                return res.status(409).json({ error: 'Session already active', port: session.port });
+                return res.status(409).json({ error: 'Session already active' });
             }
-            const port = Number(req.body?.port) || DEFAULT_PORT;
             const autoPass = !!req.body?.autoPass;
             const wantTunnel = !!req.body?.tunnel;
             const token = makeToken();
-            wss = await startServer(port);
-            session = { token, port, autoPass, turnHolder: 'host', paused: false, pendingSnapshots: new Map(), tunnel: null };
+            session = { token, autoPass, turnHolder: 'host', paused: false, pendingSnapshots: new Map(), tunnel: null };
             session.heartbeat = setInterval(() => {
-                if (!wss) return;
                 for (const c of wss.clients) {
-                    if (!c.meta.alive) { c.terminate(); continue; }
+                    if (!c.meta?.alive) { c.terminate(); continue; }
                     c.meta.alive = false;
                     c.ping();
                 }
@@ -366,8 +387,10 @@ export async function init(router) {
 
             if (wantTunnel) {
                 try {
+                    const stPort = httpServer?.address()?.port;
+                    if (!stPort) throw new Error('could not determine SillyTavern port');
                     const bin = await findCloudflared();
-                    session.tunnel = await startTunnel(bin, port);
+                    session.tunnel = await startTunnel(bin, stPort);
                     console.log(`[ST-Together] tunnel up: ${session.tunnel.url}, waiting for DNS ...`);
                     const dnsReady = await waitForTunnelDns(session.tunnel.url);
                     if (!dnsReady) throw new Error('tunnel DNS did not propagate within 90s');
@@ -378,11 +401,11 @@ export async function init(router) {
                 }
             }
 
-            console.log(`[ST-Together] session listening on 127.0.0.1:${port}`);
+            console.log('[ST-Together] session started');
             res.json({
                 ok: true,
-                port,
                 token,
+                wsPath: WS_PATH,
                 tunnelUrl: session.tunnel?.url ?? null,
             });
         } catch (error) {
@@ -401,7 +424,6 @@ export async function init(router) {
         if (!session) return res.json({ active: false });
         res.json({
             active: true,
-            port: session.port,
             turnHolder: session.turnHolder,
             autoPass: session.autoPass,
             tunnelUrl: session.tunnel?.url ?? null,

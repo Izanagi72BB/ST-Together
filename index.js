@@ -4,9 +4,20 @@
 // sends intents (messages, continue, bot reply, pass) to the host.
 
 const MOD = 'st-together';
-const DEFAULT_PORT = 5138;
+const WS_PATH = '/api/plugins/st-together/ws';
 const TYPING_IDLE_MS = 2500;
 const STREAM_THROTTLE_MS = 150;
+
+// Build a ws(s):// URL for a SillyTavern origin (its own or a tunnel's),
+// reusing http->ws / https->wss so it inherits the origin's TLS.
+function wsUrlForOrigin(origin) {
+    return origin.replace(/^http/i, 'ws').replace(/\/+$/, '') + WS_PATH;
+}
+
+// This browser's own SillyTavern origin, as a WebSocket URL.
+function localWsUrl() {
+    return wsUrlForOrigin(window.location.origin);
+}
 
 const state = {
     role: null,             // 'host' | 'guest' while connected
@@ -16,7 +27,7 @@ const state = {
     retriesLeft: 0,
     turnHolder: null,       // 'host' | 'guest'
     peerName: null,
-    session: { port: DEFAULT_PORT, token: null },
+    session: { token: null },
     typingActive: false,
     typingTimer: null,
     streamPending: null,
@@ -38,7 +49,7 @@ function getCtx() {
 function settings() {
     const ctx = getCtx();
     ctx.extensionSettings[MOD] = Object.assign(
-        { role: 'guest', port: DEFAULT_PORT, autoPass: false, tunnel: false, lastInvite: '' },
+        { role: 'guest', autoPass: false, tunnel: false, lastInvite: '' },
         ctx.extensionSettings[MOD] ?? {},
     );
     return ctx.extensionSettings[MOD];
@@ -908,16 +919,16 @@ function setStatus(text) {
     if (el) el.textContent = text;
 }
 
+// Invite is "<sillytavern-origin>#<token>", e.g.
+// "https://sagserver.org#K3n9vQ" or "http://192.168.1.5:8000#K3n9vQ".
 function parseInvite(raw) {
-    const value = String(raw ?? '').trim();
-    let match = value.match(/^stg:\/\/([^#\s]+)#(\S+)$/) || value.match(/^(wss?:\/\/[^#\s]+)#(\S+)$/);
-    if (!match) return null;
-    let addr = match[1];
-    const token = match[2];
-    if (!addr.startsWith('ws://') && !addr.startsWith('wss://')) {
-        addr = addr.includes(':') ? `ws://${addr}` : `wss://${addr}`;
-    }
-    return { url: addr, token };
+    const value = String(raw ?? '').trim().replace(/^stg:\/\//i, '');
+    const hash = value.lastIndexOf('#');
+    if (hash === -1) return null;
+    const origin = value.slice(0, hash).replace(/\/+$/, '');
+    const token = value.slice(hash + 1).trim();
+    if (!/^https?:\/\/[^\s]+$/i.test(origin) || !token) return null;
+    return { url: wsUrlForOrigin(origin), token };
 }
 
 async function pluginAvailable() {
@@ -956,10 +967,8 @@ async function hostStart() {
     }
     const ctx = getCtx();
     const s = settings();
-    const port = Number(document.getElementById('stg_port').value) || DEFAULT_PORT;
     const autoPass = document.getElementById('stg_autopass').checked;
     const tunnel = document.getElementById('stg_tunnel').checked;
-    s.port = port;
     s.autoPass = autoPass;
     s.tunnel = tunnel;
     saveSettings();
@@ -968,7 +977,7 @@ async function hostStart() {
         const response = await fetch('/api/plugins/st-together/start', {
             method: 'POST',
             headers: ctx.getRequestHeaders(),
-            body: JSON.stringify({ port, autoPass, tunnel }),
+            body: JSON.stringify({ autoPass, tunnel }),
         });
         const raw = await response.text();
         let data;
@@ -981,13 +990,12 @@ async function hostStart() {
             throw new Error(`HTTP ${response.status}: ${raw.slice(0, 100) || response.statusText}`);
         }
         if (!response.ok) throw new Error(data.error ?? response.statusText);
-        state.session.port = data.port;
         state.session.token = data.token;
-        const invite = data.tunnelUrl
-            ? `stg://${data.tunnelUrl.replace(/^https:\/\//, '')}#${data.token}`
-            : `stg://127.0.0.1:${data.port}#${data.token}`;
-        document.getElementById('stg_invite_out').value = invite;
-        connect(`ws://127.0.0.1:${data.port}`, data.token, 'host');
+        // Guests connect to whichever origin can reach this ST: the public
+        // tunnel if enabled, otherwise the same origin this browser is on.
+        const inviteOrigin = data.tunnelUrl || window.location.origin;
+        document.getElementById('stg_invite_out').value = `${inviteOrigin}#${data.token}`;
+        connect(localWsUrl(), data.token, 'host');
     } catch (error) {
         setStatus(`Start failed: ${error.message}`);
         toast('error', `Could not start session: ${error.message}`);
@@ -1011,7 +1019,7 @@ function guestJoin() {
     const raw = document.getElementById('stg_invite_in').value;
     const invite = parseInvite(raw);
     if (!invite) {
-        toast('error', 'Invalid invite code. Expected stg://host:port#token');
+        toast('error', 'Invalid invite code. Expected something like https://host#token');
         return;
     }
     const s = settings();
@@ -1042,9 +1050,8 @@ function injectSettingsPanel() {
                 </div>
                 <hr>
                 <div id="stg_host_block" class="${s.role === 'host' ? '' : 'stg-hidden'}">
-                    <label>Port <input id="stg_port" class="text_pole" type="number" min="1024" max="65535" value="${s.port}"></label>
                     <label class="checkbox_label"><input id="stg_autopass" type="checkbox" ${s.autoPass ? 'checked' : ''}> Auto-pass turn after bot reply</label>
-                    <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Expose via Cloudflare tunnel (for remote friends)</label>
+                    <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Expose via Cloudflare tunnel (only if this SillyTavern is not already reachable from the internet)</label>
                     <div class="stg-row">
                         <div id="stg_start" class="menu_button">Start Session</div>
                         <div id="stg_stop" class="menu_button">Stop</div>
@@ -1055,11 +1062,11 @@ function injectSettingsPanel() {
                             <div id="stg_copy" class="menu_button" title="Copy invite">Copy</div>
                         </div>
                     </label>
-                    <small>Without the tunnel the invite only works on this machine (testing). With it, the invite is a temporary trycloudflare URL that dies when you stop the session.</small>
+                    <small>If your friend can already open this SillyTavern in a browser (public domain or LAN), the invite works as-is. Tick the tunnel only for a purely local SillyTavern; it makes a temporary trycloudflare URL that dies when you stop the session.</small>
                 </div>
                 <div id="stg_guest_block" class="${s.role === 'guest' ? '' : 'stg-hidden'}">
                     <label>Invite code
-                        <input id="stg_invite_in" class="text_pole" type="text" placeholder="stg://host:port#token" value="${s.lastInvite.replace(/"/g, '&quot;')}">
+                        <input id="stg_invite_in" class="text_pole" type="text" placeholder="https://host#token" value="${s.lastInvite.replace(/"/g, '&quot;')}">
                     </label>
                     <div class="stg-row">
                         <div id="stg_join" class="menu_button">Join</div>

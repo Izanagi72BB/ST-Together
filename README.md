@@ -13,9 +13,14 @@ extension.
 - The **host** runs a small server plugin that referees the session:
   token-authenticated WebSocket, turn order, message relay.
 - Both players install the same UI extension and pick a role: Host or Join.
-- Remote play uses a throwaway Cloudflare quick tunnel (trycloudflare.com).
-  No domain, no port forwarding, no exposed home IP. The invite URL dies
-  when the session stops.
+- The WebSocket rides on SillyTavern's own address and port, so it works
+  wherever your SillyTavern already works: a public domain, a reverse proxy,
+  Cloudflare, or a LAN IP. If your friend can open your SillyTavern in a
+  browser, the invite works with no extra setup.
+- If your SillyTavern is only reachable on your own machine, tick **Expose
+  via Cloudflare tunnel** and the plugin spins up a throwaway
+  trycloudflare.com URL for the invite. No domain, no port forwarding, no
+  exposed home IP; the URL dies when the session stops.
 - Turns are fluid: the turn holder can write (the bot replies), extend the
   bot's last message (Continue), have the bot speak again (Bot Reply), or
   hand over (Pass Turn). Optionally the turn can auto-pass after each reply.
@@ -124,11 +129,12 @@ use.
 ## Play
 
 1. **Host:** open the character chat you want to play in, then open the
-   ST-Together drawer in the Extensions panel, pick **Host**, tick **Expose
-   via Cloudflare tunnel** (skip it for same-machine testing), and click
-   **Start Session**. Starting with the tunnel takes 30-60 seconds; the
-   invite code appears once the tunnel is verified reachable.
-2. Send the invite code (`stg://...#token`) to your friend.
+   ST-Together drawer in the Extensions panel, pick **Host**, and click
+   **Start Session**. If your friend can already reach your SillyTavern in a
+   browser (public domain or LAN), leave the tunnel unticked. Only tick
+   **Expose via Cloudflare tunnel** if your SillyTavern is purely local;
+   starting with the tunnel takes 30-60 seconds while its URL goes live.
+2. Send the invite code (`https://your-server#token`) to your friend.
 3. **Guest:** open any character and a fresh chat to mirror into, pick
    **Join** in the ST-Together drawer, paste the invite, and click **Join**.
    The host's chat syncs over automatically.
