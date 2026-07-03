@@ -41,6 +41,7 @@ const state = {
     hostAway: false,
     suppressChatPrompt: false,
     personas: {},           // host: guest name -> { name, description }
+    myAvatarSent: false,    // have we shared this player's persona avatar yet
 };
 
 function getCtx() {
@@ -146,7 +147,9 @@ function buildMessage({ name, text, isUser, uid, sendDate, remote = false }) {
         extra: { stg_uid: uid || crypto.randomUUID() },
     };
     if (remote) mes.extra.stg_remote = true;
-    if (!mes.is_user && state.remoteAvatars[mes.name]) {
+    // Remote messages (the other player's user messages and the shared bot)
+    // carry a synced avatar so they don't fall back to this instance's own.
+    if (remote && state.remoteAvatars[mes.name]) {
         mes.force_avatar = state.remoteAvatars[mes.name];
     }
     return mes;
@@ -247,6 +250,7 @@ function disconnect() {
     state.role = null;
     state.turnHolder = null;
     state.personas = {};
+    state.myAvatarSent = false;
     document.body.classList.remove('stg-guest-active');
     hideTyping();
     hideVotePrompt();
@@ -268,6 +272,7 @@ function onFrame(frame) {
             state.sharePaused = false;
             state.mirrorPaused = false;
             state.personas = {};
+            state.myAvatarSent = false;
             const currentChat = getCtx().getCurrentChatId?.() ?? null;
             if (frame.role === 'host') {
                 state.sharedChatId = currentChat;
@@ -330,9 +335,13 @@ function onFrame(frame) {
         case 'peer': {
             if (frame.role !== state.role) state.peerName = frame.online ? frame.name : state.peerName;
             toast('info', `${frame.name} ${frame.online ? 'joined' : 'left'}.`);
-            if (state.role === 'host' && frame.role === 'guest' && !frame.online) {
-                delete state.personas[frame.name];
-                updateParticipantsPrompt();
+            if (state.role === 'host' && frame.role === 'guest') {
+                if (frame.online) {
+                    sendPersona(); // introduce the host's persona to the new guest
+                } else {
+                    delete state.personas[frame.name];
+                    updateParticipantsPrompt();
+                }
             }
             applyTurnUI();
             return;
@@ -342,6 +351,7 @@ function onFrame(frame) {
                 state.personas[frame.name] = { name: frame.name, description: frame.description || '' };
                 updateParticipantsPrompt();
             }
+            if (frame.avatar) ensureRemoteAvatar(frame.avatar);
             return;
         }
         case 'vote': {
@@ -424,8 +434,61 @@ async function ensureRemoteAvatar(card) {
         });
         if (!response.ok) return;
         const data = await response.json();
-        if (data.path) state.remoteAvatars[card.name] = data.path;
+        if (data.path) {
+            state.remoteAvatars[card.name] = data.path;
+            applyAvatarRetroactively(card.name, data.path);
+        }
     } catch { /* cosmetic only; sync continues without the portrait */ }
+}
+
+// An avatar can arrive after its messages are already rendered (persona
+// avatars come in their own frame). Pin it onto existing messages and redraw.
+function applyAvatarRetroactively(name, path) {
+    const ctx = getCtx();
+    let changed = false;
+    for (const m of ctx.chat) {
+        if (m?.extra?.stg_remote && m.name === name && m.force_avatar !== path) {
+            m.force_avatar = path;
+            changed = true;
+        }
+    }
+    if (changed) redrawChat();
+}
+
+// This player's own persona avatar, read from the last message they sent
+// (its rendered avatar is the persona thumbnail). user_avatar isn't exposed
+// to extensions, so a rendered local message is the reliable source.
+function getLocalPersonaAvatarSrc() {
+    const ctx = getCtx();
+    for (let i = ctx.chat.length - 1; i >= 0; i--) {
+        const m = ctx.chat[i];
+        if (m?.is_user && !m.extra?.stg_remote) {
+            const src = document.querySelector(`#chat .mes[mesid="${i}"] .avatar img`)?.getAttribute('src') || '';
+            if (/type=persona/.test(src)) return src;
+            return null;
+        }
+    }
+    return null;
+}
+
+async function fetchAvatarB64(src) {
+    try {
+        const response = await fetch(src);
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        if (!blob.size) return null;
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+        const [meta, b64] = String(dataUrl).split(',');
+        const format = meta.includes('png') ? 'png' : meta.includes('webp') ? 'webp' : 'jpg';
+        return { format, b64 };
+    } catch {
+        return null;
+    }
 }
 
 // ------------------------------------------------------------- personas
@@ -462,13 +525,27 @@ function currentPersona() {
     };
 }
 
-// Guest: tell the host who I am so the AI can distinguish the two players.
-// The description is only shared if the guest opted in; otherwise just the name.
-function sendPersona() {
-    if (state.role !== 'guest' || !state.connected) return;
+// Announce this player's persona: guests -> host (name, opt-in description,
+// avatar); host -> guests (name, avatar) so each side can render the other's
+// user messages with the right name and avatar. The avatar is only available
+// once this player has a rendered message, so this is called again after they
+// send one.
+async function sendPersona() {
+    if (!state.connected || (state.role !== 'guest' && state.role !== 'host')) return;
     const me = currentPersona();
-    const share = settings().sharePersonaDesc;
-    wsSend({ t: 'persona', name: me.name, description: share ? me.description : '' });
+    const frame = { t: 'persona', name: me.name };
+    if (state.role === 'guest' && settings().sharePersonaDesc) frame.description = me.description;
+    if (!state.myAvatarSent) {
+        const src = getLocalPersonaAvatarSrc();
+        if (src) {
+            const av = await fetchAvatarB64(src);
+            if (av) {
+                frame.avatar = { name: me.name, format: av.format, b64: av.b64 };
+                state.myAvatarSent = true;
+            }
+        }
+    }
+    wsSend(frame);
 }
 
 // Host: inject a system note describing every participant, so the model
@@ -815,6 +892,7 @@ function hookHostEvents() {
         const uid = ensureUid(mes);
         sendTypingStop();
         wsSend({ t: 'msg.user', uid, name: mes.name, text: mes.mes, sendDate: mes.send_date });
+        if (!state.myAvatarSent) sendPersona(); // now a rendered message exists; capture the avatar
     });
 
     eventSource.on(eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => {
@@ -878,6 +956,7 @@ async function guestSend() {
     textarea.value = '';
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     await pushMessage({ name: getCtx().name1 || 'You', text, isUser: true, uid, sendDate });
+    if (!state.myAvatarSent) sendPersona(); // now a rendered message exists; capture the avatar
 }
 
 function interceptSend(event) {
@@ -1257,7 +1336,7 @@ function injectSettingsPanel() {
                     </div>
                     <div class="stg-setting">
                         <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Use a temporary public link so friends outside your network can join</label>
-                        <div class="stg-subtext">Creates a throwaway address so someone off your network can reach this session. <a href="https://github.com/Izanagi72BB/ST-Together#how-the-temporary-link-works" target="_blank" rel="noopener" class="stg-inline-link">How it works &amp; is it safe? ↗</a></div>
+                        <div class="stg-subtext">Creates a throwaway address so someone off your network can reach this session. <a href="https://github.com/Izanagi72BB/ST-Together#how-the-temporary-link-works" target="_blank" rel="noopener" class="stg-inline-link">How it works ↗</a></div>
                     </div>
                     <div class="stg-row">
                         <div id="stg_start" class="menu_button">Start Session</div>

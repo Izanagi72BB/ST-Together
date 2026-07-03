@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.4.3';
+const VERSION = '0.4.4';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -338,15 +338,20 @@ function onFrame(ws, raw) {
             return;
         }
         case 'persona': {
-            // Guest tells the host who they are so the AI can see two distinct users.
-            if (meta.role !== 'guest') return;
-            const h = hostClient();
-            if (h) {
-                send(h, {
-                    t: 'persona',
-                    name: String(msg.name ?? meta.name).slice(0, 64),
-                    description: String(msg.description ?? '').slice(0, 2000),
-                });
+            // Persona identity (name, optional description, optional avatar).
+            // Guests announce to the host (for the AI + avatars); the host
+            // announces to guests (so they can show the host's avatar).
+            const payload = {
+                t: 'persona',
+                name: String(msg.name ?? meta.name).slice(0, 64),
+                description: String(msg.description ?? '').slice(0, 2000),
+                avatar: msg.avatar && typeof msg.avatar === 'object' ? msg.avatar : null,
+            };
+            if (meta.role === 'guest') {
+                const h = hostClient();
+                if (h) send(h, payload);
+            } else {
+                for (const g of guestClients()) send(g, payload);
             }
             return;
         }
