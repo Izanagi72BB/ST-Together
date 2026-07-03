@@ -141,14 +141,28 @@ async function pushMessage({ name, text, isUser, uid, sendDate, remote = false, 
     return mes;
 }
 
+// Re-render the in-memory chat[] to the DOM without touching disk or the
+// character context. reloadCurrentChat() would re-read the chat file keyed
+// to the current character, which bounces to "you deleted a character/chat"
+// when the guest's mirror chat belongs to a character they do not have.
+async function redrawChat() {
+    const ctx = getCtx();
+    try {
+        if (typeof ctx.clearChat === 'function') await ctx.clearChat();
+        await ctx.printMessages();
+    } catch (error) {
+        console.error(`[${MOD}] redraw failed`, error);
+    }
+}
+
 async function updateMessageText(index, text) {
     const ctx = getCtx();
     ctx.chat[index].mes = String(text ?? '');
     try {
         ctx.updateMessageBlock(index, ctx.chat[index]);
     } catch (error) {
-        console.error(`[${MOD}] updateMessageBlock failed, reloading chat`, error);
-        await ctx.reloadCurrentChat();
+        console.error(`[${MOD}] updateMessageBlock failed, redrawing chat`, error);
+        await redrawChat();
     }
     await ctx.saveChat();
 }
@@ -411,7 +425,7 @@ async function applySnapshot(frame) {
     // A fresh snapshot (host shared a different chat) replaces everything,
     // so always rebuild the view; otherwise only when something changed.
     if (removed > 0 || updated > 0 || frame.fresh) {
-        await ctx.reloadCurrentChat();
+        await redrawChat();
     }
     if (typeof frame.turn === 'string') state.turnHolder = frame.turn;
     applyTurnUI();
