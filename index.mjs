@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -87,19 +87,33 @@ function setTurn(holder, reason) {
 // ------------------------------------------------------------------ tunnel
 
 async function findCloudflared() {
-    if (commandExistsSync('cloudflared')) return 'cloudflared';
+    // Prefer our own freshly-downloaded binary over a system cloudflared:
+    // older system installs silently drop WebSocket upgrades in quick-tunnel
+    // (--url) mode, which breaks guest connections in a way that looks like a
+    // 404. A current binary forwards WebSockets correctly.
     if (fs.existsSync(localCloudflared)) return localCloudflared;
     const asset = cloudflaredAssetName();
-    if (!asset) {
-        throw new Error('cloudflared is not installed. Install it (on macOS: brew install cloudflared) and restart SillyTavern.');
+    if (asset) {
+        try {
+            console.log('[ST-Together] downloading a current cloudflared to the plugin folder ...');
+            const response = await fetch(`https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`, { redirect: 'follow' });
+            if (response.ok) {
+                const buffer = Buffer.from(await response.arrayBuffer());
+                fs.writeFileSync(localCloudflared, buffer, { mode: 0o755 });
+                console.log(`[ST-Together] cloudflared downloaded (${(buffer.length / 1024 / 1024).toFixed(1)} MB)`);
+                return localCloudflared;
+            }
+            console.error(`[ST-Together] cloudflared download failed: HTTP ${response.status}`);
+        } catch (error) {
+            console.error('[ST-Together] cloudflared download failed:', error?.message ?? error);
+        }
     }
-    console.log('[ST-Together] cloudflared not found, downloading to plugin folder ...');
-    const response = await fetch(`https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`, { redirect: 'follow' });
-    if (!response.ok) throw new Error(`cloudflared download failed: HTTP ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    fs.writeFileSync(localCloudflared, buffer, { mode: 0o755 });
-    console.log(`[ST-Together] cloudflared downloaded (${(buffer.length / 1024 / 1024).toFixed(1)} MB)`);
-    return localCloudflared;
+    // Fall back to a system cloudflared only if we could not fetch our own.
+    if (commandExistsSync('cloudflared')) {
+        console.warn('[ST-Together] using system cloudflared; if guests get a 404, it is too old for quick-tunnel WebSockets — update it.');
+        return 'cloudflared';
+    }
+    throw new Error('cloudflared is not available and could not be downloaded. Install it (on macOS: brew install cloudflared) and restart SillyTavern.');
 }
 
 function startTunnel(bin, port) {
