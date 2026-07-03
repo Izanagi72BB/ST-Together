@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
