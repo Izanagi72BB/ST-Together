@@ -40,6 +40,7 @@ const state = {
     mirrorPaused: false,
     hostAway: false,
     suppressChatPrompt: false,
+    personas: {},           // host: guest name -> { name, description }
 };
 
 function getCtx() {
@@ -49,7 +50,7 @@ function getCtx() {
 function settings() {
     const ctx = getCtx();
     ctx.extensionSettings[MOD] = Object.assign(
-        { role: 'guest', autoPass: false, tunnel: true, lastInvite: '' },
+        { role: 'guest', autoPass: false, tunnel: true, announcePlayers: true, lastInvite: '' },
         ctx.extensionSettings[MOD] ?? {},
     );
     return ctx.extensionSettings[MOD];
@@ -221,6 +222,7 @@ function connect(url, token, role) {
         hideTyping();
         hideVotePrompt();
         removeGhost();
+        clearParticipantsPrompt();
         applyTurnUI();
         setStatus(event.reason ? `Disconnected: ${event.reason}` : 'Disconnected.');
         if (!state.manualClose && wasConnected && role === 'guest' && state.retriesLeft > 0) {
@@ -241,10 +243,12 @@ function disconnect() {
     state.connected = false;
     state.role = null;
     state.turnHolder = null;
+    state.personas = {};
     document.body.classList.remove('stg-guest-active');
     hideTyping();
     hideVotePrompt();
     removeGhost();
+    clearParticipantsPrompt();
     applyTurnUI();
 }
 
@@ -260,6 +264,7 @@ function onFrame(frame) {
             state.hostAway = false;
             state.sharePaused = false;
             state.mirrorPaused = false;
+            state.personas = {};
             const currentChat = getCtx().getCurrentChatId?.() ?? null;
             if (frame.role === 'host') {
                 state.sharedChatId = currentChat;
@@ -275,6 +280,7 @@ function onFrame(frame) {
             } else {
                 state.mirrorChatId = currentChat;
                 state.hostAway = !!frame.paused;
+                sendPersona();
             }
             document.body.classList.toggle('stg-guest-active', frame.role === 'guest');
             setStatus(`Connected as ${frame.role}.`);
@@ -321,7 +327,18 @@ function onFrame(frame) {
         case 'peer': {
             if (frame.role !== state.role) state.peerName = frame.online ? frame.name : state.peerName;
             toast('info', `${frame.name} ${frame.online ? 'joined' : 'left'}.`);
+            if (state.role === 'host' && frame.role === 'guest' && !frame.online) {
+                delete state.personas[frame.name];
+                updateParticipantsPrompt();
+            }
             applyTurnUI();
+            return;
+        }
+        case 'persona': {
+            if (state.role === 'host') {
+                state.personas[frame.name] = { name: frame.name, description: frame.description || '' };
+                updateParticipantsPrompt();
+            }
             return;
         }
         case 'vote': {
@@ -406,6 +423,51 @@ async function ensureRemoteAvatar(card) {
         const data = await response.json();
         if (data.path) state.remoteAvatars[card.name] = data.path;
     } catch { /* cosmetic only; sync continues without the portrait */ }
+}
+
+// ------------------------------------------------------------- personas
+
+const PARTICIPANTS_KEY = 'ST_TOGETHER_PARTICIPANTS';
+
+function currentPersona() {
+    const ctx = getCtx();
+    return {
+        name: ctx.name1 || 'Player',
+        description: String(ctx.powerUserSettings?.persona_description ?? '').trim(),
+    };
+}
+
+// Guest: tell the host who I am so the AI can distinguish the two players.
+function sendPersona() {
+    if (state.role !== 'guest' || !state.connected) return;
+    const me = currentPersona();
+    wsSend({ t: 'persona', name: me.name, description: me.description });
+}
+
+// Host: inject a system note describing every participant, so the model
+// treats the players as distinct people and can address them by name. ST's
+// own persona injection only ever covers the host's persona.
+function updateParticipantsPrompt() {
+    const ctx = getCtx();
+    if (typeof ctx.setExtensionPrompt !== 'function') return;
+    const s = settings();
+    const guests = Object.values(state.personas);
+    if (state.role !== 'host' || !state.connected || !s.announcePlayers || guests.length === 0) {
+        ctx.setExtensionPrompt(PARTICIPANTS_KEY, '', 1, 4, false, 0);
+        return;
+    }
+    const host = currentPersona();
+    const line = (p) => `- ${p.name}${p.description ? `: ${p.description}` : ''}`;
+    const roster = [host, ...guests].map(line).join('\n');
+    const text = `[Multiplayer scene: more than one person is taking part in this chat, each playing their own character. Treat them as distinct individuals and address them by name when it fits. Participants:\n${roster}\nEvery user message is labelled with its sender's name; respond to whoever spoke most recently while staying aware of everyone present.]`;
+    ctx.setExtensionPrompt(PARTICIPANTS_KEY, text, 1, 4, false, 0);
+}
+
+function clearParticipantsPrompt() {
+    const ctx = getCtx();
+    if (typeof ctx.setExtensionPrompt === 'function') {
+        ctx.setExtensionPrompt(PARTICIPANTS_KEY, '', 1, 4, false, 0);
+    }
 }
 
 async function applySnapshot(frame) {
@@ -717,6 +779,9 @@ function hookHostEvents() {
     eventSource.on(eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => {
         if (!state.connected || state.role !== 'host' || state.sharePaused || dryRun) return;
         const ctx = getCtx();
+        // Refresh the participants note so the host's own persona is current
+        // before the prompt is built.
+        updateParticipantsPrompt();
         const name = ctx.characters?.[ctx.characterId]?.name || ctx.name2 || 'Bot';
         wsSend({ t: 'gen.start', name });
     });
@@ -1119,6 +1184,7 @@ function injectSettingsPanel() {
                 <hr>
                 <div id="stg_host_block" class="${s.role === 'host' ? '' : 'stg-hidden'}">
                     <label class="checkbox_label"><input id="stg_autopass" type="checkbox" ${s.autoPass ? 'checked' : ''}> Auto-pass turn after bot reply</label>
+                    <label class="checkbox_label"><input id="stg_announce" type="checkbox" ${s.announcePlayers ? 'checked' : ''}> Tell the AI there are multiple players (share personas so it addresses each by name)</label>
                     <div class="stg-tunnel-row">
                         <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Use a temporary public link so friends outside your network can join</label>
                         <a href="https://github.com/Izanagi72BB/ST-Together#how-the-temporary-link-works" target="_blank" rel="noopener" class="stg-help" title="How this works and why it's safe">(?)</a>
@@ -1161,6 +1227,11 @@ function injectSettingsPanel() {
     });
     $('#stg_start').on('click', hostStart);
     $('#stg_stop').on('click', hostStop);
+    $('#stg_announce').on('change', function () {
+        settings().announcePlayers = this.checked;
+        saveSettings();
+        updateParticipantsPrompt();
+    });
     $('#stg_join').on('click', guestJoin);
     $('#stg_leave').on('click', () => { disconnect(); setStatus('Left the session.'); });
     $('#stg_copy').on('click', () => {

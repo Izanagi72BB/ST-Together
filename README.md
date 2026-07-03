@@ -27,6 +27,11 @@ extension.
 - Either player can propose a swipe with **Vote Swipe**. The other player
   gets an Agree/Disagree prompt, and only on agreement does the bot's last
   response get regenerated, so you re-roll cooperatively.
+- The AI is told it's talking to more than one person. Each guest's persona
+  (name and description) is shared with the host and added to the prompt, so
+  the character treats the players as distinct people and can address each by
+  name. Toggle it off with the host's "Tell the AI there are multiple
+  players" setting.
 - Drafts are private. Only a boolean "is typing" signal leaves your machine,
   shown to the other player as a "X is writing" indicator with bouncing dots.
   The bot's reply streams live to both players.

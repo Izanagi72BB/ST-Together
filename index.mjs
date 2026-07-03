@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.3.2';
+const VERSION = '0.4.0';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -334,6 +334,19 @@ function onFrame(ws, raw) {
                 session.swipeVote = null;
                 broadcast({ t: 'vote', kind: 'failed', name: meta.name });
                 return;
+            }
+            return;
+        }
+        case 'persona': {
+            // Guest tells the host who they are so the AI can see two distinct users.
+            if (meta.role !== 'guest') return;
+            const h = hostClient();
+            if (h) {
+                send(h, {
+                    t: 'persona',
+                    name: String(msg.name ?? meta.name).slice(0, 64),
+                    description: String(msg.description ?? '').slice(0, 2000),
+                });
             }
             return;
         }
