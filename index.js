@@ -60,7 +60,27 @@ function toast(kind, msg) {
     if (window.toastr) toastr[kind](msg, 'ST-Together');
 }
 
-function stgPrompt(title, text, buttons) {
+async function stgPrompt(title, text, buttons) {
+    // Native ST popup: last option doubles as the OK button, so Escape or
+    // closing the dialog resolves to the safe choice (Not now / Keep).
+    const ctx = getCtx();
+    if (typeof ctx.callGenericPopup === 'function') {
+        try {
+            const customButtons = buttons.slice(0, -1).map((b, i) => ({ text: b.label, result: 100 + i }));
+            const result = await ctx.callGenericPopup(text, 1, '', {
+                okButton: buttons[buttons.length - 1].label,
+                customButtons,
+            });
+            const index = Number(result) - 100;
+            return buttons[index]?.value ?? buttons[buttons.length - 1].value;
+        } catch (error) {
+            console.error(`[${MOD}] native popup failed, using fallback`, error);
+        }
+    }
+    return domPrompt(title, text, buttons);
+}
+
+function domPrompt(title, text, buttons) {
     return new Promise((resolve) => {
         document.getElementById('stg_modal')?.remove();
         const overlay = document.createElement('div');
@@ -209,8 +229,21 @@ function onFrame(frame) {
             state.sharePaused = false;
             state.mirrorPaused = false;
             const currentChat = getCtx().getCurrentChatId?.() ?? null;
-            if (frame.role === 'host') state.sharedChatId = currentChat;
-            else state.mirrorChatId = currentChat;
+            if (frame.role === 'host') {
+                state.sharedChatId = currentChat;
+                if (!currentChat) {
+                    // Welcome screen / no real chat open: don't share the
+                    // assistant hint messages. Wait for a chat to be opened.
+                    state.sharePaused = true;
+                    wsSend({ t: 'share.paused', paused: true });
+                    setStatus('Connected as host. Open a chat to start sharing it.');
+                    applyTurnUI();
+                    return;
+                }
+            } else {
+                state.mirrorChatId = currentChat;
+                state.hostAway = !!frame.paused;
+            }
             document.body.classList.toggle('stg-guest-active', frame.role === 'guest');
             setStatus(`Connected as ${frame.role}.`);
             applyTurnUI();
@@ -375,7 +408,9 @@ async function applySnapshot(frame) {
     }
 
     await ctx.saveChat();
-    if (removed > 0 || updated > 0) {
+    // A fresh snapshot (host shared a different chat) replaces everything,
+    // so always rebuild the view; otherwise only when something changed.
+    if (removed > 0 || updated > 0 || frame.fresh) {
         await ctx.reloadCurrentChat();
     }
     if (typeof frame.turn === 'string') state.turnHolder = frame.turn;

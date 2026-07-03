@@ -178,7 +178,7 @@ function onFrame(ws, raw) {
         meta.authed = true;
         meta.role = role;
         meta.name = String(msg.name || (role === 'host' ? 'Host' : 'Guest')).slice(0, 64);
-        send(ws, { t: 'welcome', role, turn: session.turnHolder, autoPass: session.autoPass });
+        send(ws, { t: 'welcome', role, turn: session.turnHolder, autoPass: session.autoPass, paused: session.paused });
         broadcast({ t: 'peer', name: meta.name, role, online: true }, ws);
         if (role === 'guest') {
             const h = hostClient();
