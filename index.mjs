@@ -22,6 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
+const VERSION = '0.2.1';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -420,10 +421,18 @@ export async function init(router) {
         res.json({ ok: true });
     });
 
+    // Zero-auth version probe: visit this URL in a browser to confirm the
+    // server plugin actually updated (the extension's Update button does not
+    // touch it; only a full SillyTavern restart git-pulls the plugin).
+    router.get('/version', (_req, res) => {
+        res.json({ version: VERSION, wsPath: WS_PATH, upgradeAttached });
+    });
+
     router.get('/status', (_req, res) => {
-        if (!session) return res.json({ active: false });
+        if (!session) return res.json({ active: false, version: VERSION });
         res.json({
             active: true,
+            version: VERSION,
             turnHolder: session.turnHolder,
             autoPass: session.autoPass,
             tunnelUrl: session.tunnel?.url ?? null,
