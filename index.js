@@ -21,6 +21,14 @@ const state = {
     typingTimer: null,
     streamPending: null,
     streamTimer: null,
+    remoteAvatars: {},
+    avatarCache: null,
+    sharedChatId: null,
+    sharePaused: false,
+    mirrorChatId: null,
+    mirrorPaused: false,
+    hostAway: false,
+    suppressChatPrompt: false,
 };
 
 function getCtx() {
@@ -52,6 +60,34 @@ function toast(kind, msg) {
     if (window.toastr) toastr[kind](msg, 'ST-Together');
 }
 
+function stgPrompt(title, text, buttons) {
+    return new Promise((resolve) => {
+        document.getElementById('stg_modal')?.remove();
+        const overlay = document.createElement('div');
+        overlay.id = 'stg_modal';
+        const box = document.createElement('div');
+        box.className = 'stg-modal-box';
+        const heading = document.createElement('div');
+        heading.className = 'stg-modal-title';
+        heading.textContent = title;
+        const body = document.createElement('div');
+        body.className = 'stg-modal-text';
+        body.textContent = text;
+        const row = document.createElement('div');
+        row.className = 'stg-row';
+        for (const button of buttons) {
+            const el = document.createElement('div');
+            el.className = 'menu_button';
+            el.textContent = button.label;
+            el.addEventListener('click', () => { overlay.remove(); resolve(button.value); });
+            row.appendChild(el);
+        }
+        box.append(heading, body, row);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+    });
+}
+
 // ---------------------------------------------------------------- chat ops
 
 function findByUid(uid) {
@@ -76,6 +112,9 @@ async function pushMessage({ name, text, isUser, uid, sendDate, remote = false, 
         extra: { stg_uid: uid || crypto.randomUUID() },
     };
     if (remote) mes.extra.stg_remote = true;
+    if (!mes.is_user && state.remoteAvatars[mes.name]) {
+        mes.force_avatar = state.remoteAvatars[mes.name];
+    }
     ctx.chat.push(mes);
     ctx.addOneMessage(mes);
     if (save) await ctx.saveChat();
@@ -166,6 +205,12 @@ function onFrame(frame) {
             state.role = frame.role;
             state.turnHolder = frame.turn;
             state.retriesLeft = 3;
+            state.hostAway = false;
+            state.sharePaused = false;
+            state.mirrorPaused = false;
+            const currentChat = getCtx().getCurrentChatId?.() ?? null;
+            if (frame.role === 'host') state.sharedChatId = currentChat;
+            else state.mirrorChatId = currentChat;
             document.body.classList.toggle('stg-guest-active', frame.role === 'guest');
             setStatus(`Connected as ${frame.role}.`);
             applyTurnUI();
@@ -176,11 +221,19 @@ function onFrame(frame) {
         case 'msg.user': return void onRemoteUserMessage(frame);
         case 'exec': return void onExec(frame);
         case 'gen.start': {
-            if (state.role === 'guest') showGhost();
+            if (state.role === 'guest' && !state.mirrorPaused) showGhost();
             return;
         }
         case 'gen.token': {
-            if (state.role === 'guest') updateGhost(frame.text);
+            if (state.role === 'guest' && !state.mirrorPaused) updateGhost(frame.text);
+            return;
+        }
+        case 'share.paused': {
+            if (state.role === 'guest') {
+                state.hostAway = !!frame.paused;
+                applyTurnUI();
+                if (frame.paused) toast('info', 'Host stepped out of the shared chat.');
+            }
             return;
         }
         case 'gen.end': return void onGenEnd(frame);
@@ -213,6 +266,7 @@ function onFrame(frame) {
                 'no-host': 'Host is not connected.',
                 'host-taken': 'A host is already connected.',
                 'room-full': 'Session is full.',
+                'host-away': 'Host is in another chat right now.',
             };
             toast('warning', messages[frame.code] ?? frame.msg ?? frame.code);
             return;
@@ -222,18 +276,76 @@ function onFrame(frame) {
     }
 }
 
-async function applySnapshot(frame) {
-    if (state.role !== 'guest') return;
+// Host: capture the current character's portrait once per character, as a
+// small base64 payload the guest can store locally.
+async function getBotAvatarB64() {
     const ctx = getCtx();
+    const char = ctx.characters?.[ctx.characterId];
+    if (!char?.avatar) return null;
+    if (state.avatarCache?.chid === ctx.characterId) return state.avatarCache.payload;
+    const sources = [
+        `/thumbnail?type=avatar&file=${encodeURIComponent(char.avatar)}`,
+        `/characters/${encodeURIComponent(char.avatar)}`,
+    ];
+    for (const src of sources) {
+        try {
+            const response = await fetch(src);
+            if (!response.ok) continue;
+            const blob = await response.blob();
+            if (!blob.size) continue;
+            const dataUrl = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+            const [meta, b64] = String(dataUrl).split(',');
+            const format = meta.includes('png') ? 'png' : meta.includes('webp') ? 'webp' : 'jpg';
+            const payload = { name: char.name, format, b64 };
+            state.avatarCache = { chid: ctx.characterId, payload };
+            return payload;
+        } catch { /* try the next source */ }
+    }
+    return null;
+}
+
+// Guest: save the host's character portrait into local ST images once,
+// then reference it via force_avatar on mirrored bot messages.
+async function ensureRemoteAvatar(card) {
+    if (!card?.b64 || !card.name || state.remoteAvatars[card.name]) return;
+    try {
+        const response = await fetch('/api/images/upload', {
+            method: 'POST',
+            headers: getCtx().getRequestHeaders(),
+            body: JSON.stringify({
+                image: card.b64,
+                format: card.format || 'png',
+                ch_name: 'ST-Together',
+                filename: `avatar-${card.name}`,
+            }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.path) state.remoteAvatars[card.name] = data.path;
+    } catch { /* cosmetic only; sync continues without the portrait */ }
+}
+
+async function applySnapshot(frame) {
+    if (state.role !== 'guest' || state.mirrorPaused) return;
+    const ctx = getCtx();
+    state.mirrorChatId = ctx.getCurrentChatId?.() ?? null;
+    await ensureRemoteAvatar(frame.botAvatar);
     const snapshot = frame.messages ?? [];
     const snapshotUids = new Set(snapshot.map(m => m.uid));
     let added = 0, updated = 0, removed = 0;
 
     // Remove host-origin messages the host no longer has (deletions).
-    // Never remove this guest's own messages; they may still be in flight.
+    // Normally this guest's own messages are kept (they may be in flight),
+    // but a fresh snapshot (host switched chats) sweeps everything synced.
     for (let i = ctx.chat.length - 1; i >= 0; i--) {
         const m = ctx.chat[i];
-        if (m?.extra?.stg_remote && m.extra.stg_uid && !snapshotUids.has(m.extra.stg_uid)) {
+        const tracked = m?.extra?.stg_uid && (m.extra.stg_remote || frame.fresh);
+        if (tracked && !snapshotUids.has(m.extra.stg_uid)) {
             ctx.chat.splice(i, 1);
             removed++;
         }
@@ -247,9 +359,18 @@ async function applySnapshot(frame) {
                 uid: m.uid, sendDate: m.sendDate, remote: true, save: false,
             });
             added++;
-        } else if (ctx.chat[idx].mes !== m.text) {
-            ctx.chat[idx].mes = m.text;
-            updated++;
+        } else {
+            const existing = ctx.chat[idx];
+            let changed = false;
+            if (existing.mes !== m.text) {
+                existing.mes = m.text;
+                changed = true;
+            }
+            if (!existing.is_user && !existing.force_avatar && state.remoteAvatars[existing.name]) {
+                existing.force_avatar = state.remoteAvatars[existing.name];
+                changed = true;
+            }
+            if (changed) updated++;
         }
     }
 
@@ -281,9 +402,15 @@ function buildSnapshotMessages() {
 async function answerSnapshot(frame) {
     if (state.role !== 'host') return;
     const ctx = getCtx();
+    if (state.sharePaused) {
+        // Not in the shared chat; answer empty so the guest is not fed the wrong chat.
+        wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: '', messages: [] });
+        return;
+    }
     const messages = buildSnapshotMessages();
-    await ctx.saveChat();
-    wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: ctx.getCurrentChatId?.() ?? '', messages });
+    try { await ctx.saveChat(); } catch { /* nothing saveable (welcome screen) */ }
+    const botAvatar = await getBotAvatarB64();
+    wsSend({ t: 'snapshot', reqId: frame.reqId, chatName: ctx.getCurrentChatId?.() ?? '', messages, botAvatar });
 }
 
 let resyncTimer = null;
@@ -292,15 +419,116 @@ function scheduleResync() {
     if (resyncTimer) clearTimeout(resyncTimer);
     resyncTimer = setTimeout(async () => {
         resyncTimer = null;
-        if (!state.connected || state.role !== 'host') return;
+        if (!state.connected || state.role !== 'host' || state.sharePaused) return;
         const ctx = getCtx();
         const messages = buildSnapshotMessages();
-        await ctx.saveChat();
-        wsSend({ t: 'snapshot', chatName: ctx.getCurrentChatId?.() ?? '', messages });
+        try { await ctx.saveChat(); } catch { /* nothing saveable */ }
+        const botAvatar = await getBotAvatarB64();
+        wsSend({ t: 'snapshot', chatName: ctx.getCurrentChatId?.() ?? '', messages, botAvatar });
     }, 800);
 }
 
+// ---------------------------------------------------- chat switch handling
+
+async function shareCurrentChat() {
+    const ctx = getCtx();
+    state.sharedChatId = ctx.getCurrentChatId?.() ?? null;
+    state.sharePaused = false;
+    wsSend({ t: 'share.paused', paused: false });
+    const messages = buildSnapshotMessages();
+    try { await ctx.saveChat(); } catch { /* nothing saveable */ }
+    const botAvatar = await getBotAvatarB64();
+    wsSend({ t: 'snapshot', fresh: true, chatName: state.sharedChatId ?? '', messages, botAvatar });
+    setStatus('Connected as host.');
+}
+
+function setSharePaused() {
+    state.sharePaused = true;
+    wsSend({ t: 'share.paused', paused: true });
+    setStatus('Sharing paused: you are outside the shared chat. Return to it to resume.');
+}
+
+async function onHostChatChanged() {
+    const ctx = getCtx();
+    const chatId = ctx.getCurrentChatId?.() ?? null;
+    if (state.suppressChatPrompt) return;
+    if (chatId && chatId === state.sharedChatId) {
+        if (state.sharePaused) {
+            state.sharePaused = false;
+            wsSend({ t: 'share.paused', paused: false });
+            setStatus('Connected as host.');
+            toast('info', 'Back in the shared chat; sharing resumed.');
+        }
+        return;
+    }
+    if (!chatId) {
+        if (!state.sharePaused) setSharePaused();
+        return;
+    }
+    const choice = await stgPrompt(
+        'ST-Together',
+        'You switched chats while hosting a session. Share this chat with the other player?',
+        [
+            { label: 'Share this chat', value: 'share' },
+            { label: 'Share a new chat', value: 'new' },
+            { label: 'Not now', value: 'cancel' },
+        ],
+    );
+    if (choice === 'share') {
+        await shareCurrentChat();
+        toast('success', 'Now sharing this chat.');
+    } else if (choice === 'new') {
+        state.suppressChatPrompt = true;
+        try {
+            await getCtx().executeSlashCommands('/newchat');
+        } catch (error) {
+            console.error(`[${MOD}] /newchat failed`, error);
+            toast('error', 'Could not create a new chat.');
+        }
+        state.suppressChatPrompt = false;
+        await shareCurrentChat();
+        toast('success', 'Now sharing a fresh chat.');
+    } else {
+        setSharePaused();
+    }
+}
+
+async function onGuestChatChanged() {
+    const ctx = getCtx();
+    const chatId = ctx.getCurrentChatId?.() ?? null;
+    if (state.suppressChatPrompt) return;
+    if (chatId && chatId === state.mirrorChatId) {
+        if (state.mirrorPaused) {
+            state.mirrorPaused = false;
+            wsSend({ t: 'snapshot.get' });
+            toast('info', 'Back in the mirror chat; resyncing.');
+        }
+        return;
+    }
+    if (!chatId) {
+        state.mirrorPaused = true;
+        return;
+    }
+    const choice = await stgPrompt(
+        'ST-Together',
+        'Mirror the multiplayer session into this chat instead?',
+        [
+            { label: 'Mirror here', value: 'here' },
+            { label: 'Keep it where it was', value: 'keep' },
+        ],
+    );
+    if (choice === 'here') {
+        state.mirrorChatId = chatId;
+        state.mirrorPaused = false;
+        wsSend({ t: 'snapshot.get' });
+    } else {
+        state.mirrorPaused = true;
+        setStatus('Mirror paused: the session chat is elsewhere. Return to it to resume.');
+    }
+}
+
 async function onRemoteUserMessage(frame) {
+    if (state.role === 'guest' && state.mirrorPaused) return;
     if (findByUid(frame.uid) !== -1) return;
     hideTyping();
     await pushMessage({
@@ -311,6 +539,10 @@ async function onRemoteUserMessage(frame) {
 
 async function onExec(frame) {
     if (state.role !== 'host') return;
+    if (state.sharePaused) {
+        wsSend({ t: 'gen.abort' });
+        return;
+    }
     const ctx = getCtx();
     try {
         if (frame.kind === 'message') {
@@ -335,7 +567,7 @@ async function onExec(frame) {
 }
 
 async function onGenEnd(frame) {
-    if (state.role !== 'guest') return;
+    if (state.role !== 'guest' || state.mirrorPaused) return;
     removeGhost();
     const idx = findByUid(frame.uid);
     if (idx !== -1) {
@@ -363,7 +595,7 @@ function hookHostEvents() {
     const { eventSource, eventTypes } = ctx;
 
     eventSource.on(eventTypes.MESSAGE_SENT, (index) => {
-        if (!state.connected || state.role !== 'host') return;
+        if (!state.connected || state.role !== 'host' || state.sharePaused) return;
         const mes = getCtx().chat[index];
         if (!mes || mes.extra?.stg_remote) return;
         const uid = ensureUid(mes);
@@ -372,12 +604,12 @@ function hookHostEvents() {
     });
 
     eventSource.on(eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => {
-        if (!state.connected || state.role !== 'host' || dryRun) return;
+        if (!state.connected || state.role !== 'host' || state.sharePaused || dryRun) return;
         wsSend({ t: 'gen.start' });
     });
 
     eventSource.on(eventTypes.STREAM_TOKEN_RECEIVED, (text) => {
-        if (!state.connected || state.role !== 'host' || typeof text !== 'string') return;
+        if (!state.connected || state.role !== 'host' || state.sharePaused || typeof text !== 'string') return;
         state.streamPending = text;
         if (!state.streamTimer) {
             state.streamTimer = setTimeout(flushStream, STREAM_THROTTLE_MS);
@@ -385,7 +617,7 @@ function hookHostEvents() {
     });
 
     eventSource.on(eventTypes.GENERATION_ENDED, () => {
-        if (!state.connected || state.role !== 'host') return;
+        if (!state.connected || state.role !== 'host' || state.sharePaused) return;
         flushStream();
         const last = getCtx().chat.at(-1);
         if (!last || last.is_user || last.is_system) {
@@ -397,15 +629,15 @@ function hookHostEvents() {
     });
 
     eventSource.on(eventTypes.GENERATION_STOPPED, () => {
-        if (!state.connected || state.role !== 'host') return;
+        if (!state.connected || state.role !== 'host' || state.sharePaused) return;
         flushStream();
         wsSend({ t: 'gen.abort' });
     });
 
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
-        if (state.connected && state.role === 'host') {
-            toast('warning', 'Chat changed while hosting. Guests are still synced to the old chat; stop and restart the session.');
-        }
+        if (!state.connected) return;
+        if (state.role === 'host') onHostChatChanged();
+        if (state.role === 'guest') onGuestChatChanged();
     });
 
     // Edits, deletes, and swipes on the host push a full snapshot; guests reconcile.
@@ -541,17 +773,22 @@ function applyTurnUI() {
     }
 
     bar.classList.remove('stg-hidden');
-    const mine = myTurn();
-    document.getElementById('stg_turn_label').textContent = mine
-        ? 'Your turn'
-        : `Waiting: ${state.peerName ?? 'other player'}'s turn`;
+    const away = state.role === 'guest' && state.hostAway;
+    const mine = myTurn() && !away;
+    document.getElementById('stg_turn_label').textContent = away
+        ? 'Paused: host is in another chat'
+        : mine
+            ? 'Your turn'
+            : `Waiting: ${state.peerName ?? 'other player'}'s turn`;
     bar.classList.toggle('stg-my-turn', mine);
     for (const id of ['stg_continue', 'stg_botreply', 'stg_pass']) {
         document.getElementById(id)?.classList.toggle('disabled', !mine);
     }
     if (textarea) {
         textarea.disabled = !mine;
-        textarea.placeholder = mine ? 'Your turn. Type a message...' : 'Waiting for the other player...';
+        textarea.placeholder = away
+            ? 'Host is in another chat...'
+            : mine ? 'Your turn. Type a message...' : 'Waiting for the other player...';
     }
 }
 

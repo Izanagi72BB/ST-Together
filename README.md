@@ -101,7 +101,11 @@ on first use.
 
 - Host edits, deletes, and swipes sync to guests. Guest-side editing and
   swiping are disabled by design.
-- If the host switches chats mid-session, stop and restart the session.
+- Switching chats mid-session is handled with a prompt. The host chooses
+  between sharing the newly opened chat, sharing a fresh chat with that
+  character, or pausing the session until they return to the shared chat
+  (guests see a "host is in another chat" lock meanwhile). Guests get a
+  similar prompt to move their local mirror.
 - Two instances on one machine for testing: open them under different
   hostnames (for example `127.0.0.1:8000` and `localhost:8001`), otherwise
   the instances fight over cookies and requests fail with CSRF errors.

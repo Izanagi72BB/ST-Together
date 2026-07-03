@@ -200,6 +200,8 @@ function onFrame(ws, raw) {
                 t: 'snapshot',
                 chatName: msg.chatName,
                 messages: Array.isArray(msg.messages) ? msg.messages : [],
+                botAvatar: msg.botAvatar ?? null,
+                fresh: !!msg.fresh,
                 turn: session.turnHolder,
             };
             if (msg.reqId) {
@@ -222,6 +224,9 @@ function onFrame(ws, raw) {
                 sendDate: msg.sendDate,
             };
             if (meta.role === 'guest') {
+                if (session.paused) {
+                    return send(ws, { t: 'error', code: 'host-away' });
+                }
                 if (session.turnHolder !== 'guest') {
                     return send(ws, { t: 'error', code: 'not-your-turn' });
                 }
@@ -241,6 +246,9 @@ function onFrame(ws, raw) {
         case 'action': {
             const kind = msg.kind;
             if (!['continue', 'botreply', 'pass'].includes(kind)) return;
+            if (meta.role === 'guest' && session.paused) {
+                return send(ws, { t: 'error', code: 'host-away' });
+            }
             if (session.turnHolder !== meta.role) {
                 return send(ws, { t: 'error', code: 'not-your-turn' });
             }
@@ -261,6 +269,23 @@ function onFrame(ws, raw) {
             if (msg.t === 'gen.end' && session.autoPass) {
                 setTurn(otherRole(session.turnHolder), 'auto');
             }
+            return;
+        }
+        case 'share.paused': {
+            // Host stepped out of (or back into) the shared chat.
+            if (meta.role !== 'host') return;
+            session.paused = !!msg.paused;
+            for (const g of guestClients()) send(g, { t: 'share.paused', paused: session.paused });
+            return;
+        }
+        case 'snapshot.get': {
+            // Guest asking for a fresh snapshot (mirror moved or resumed).
+            if (meta.role !== 'guest') return;
+            const h = hostClient();
+            if (!h) return send(ws, { t: 'error', code: 'no-host' });
+            const reqId = crypto.randomUUID();
+            session.pendingSnapshots.set(reqId, ws);
+            send(h, { t: 'snapshot.req', reqId });
             return;
         }
         case 'typing': {
@@ -329,7 +354,7 @@ export async function init(router) {
             const wantTunnel = !!req.body?.tunnel;
             const token = makeToken();
             wss = await startServer(port);
-            session = { token, port, autoPass, turnHolder: 'host', pendingSnapshots: new Map(), tunnel: null };
+            session = { token, port, autoPass, turnHolder: 'host', paused: false, pendingSnapshots: new Map(), tunnel: null };
             session.heartbeat = setInterval(() => {
                 if (!wss) return;
                 for (const c of wss.clients) {
