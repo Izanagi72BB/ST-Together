@@ -6,6 +6,8 @@ character. The chat and the LLM API connection live entirely on the host's
 machine; the guest needs no API key and no configuration beyond this
 extension.
 
+![Two players in a shared turn-based session: the host on the left has the turn, the guest on the right is locked with "Waiting: User's turn".](docs/hero-turn-based-play.png)
+
 ## How it works
 
 - The **host** runs a small server plugin that referees the session:
@@ -21,81 +23,129 @@ extension.
   shown to the other player as a "X is writing" indicator with bouncing dots.
   The bot's reply streams live to both players.
 
+## Install: guest
+
+If you are only joining a friend's session, this is all you need.
+
+1. In SillyTavern, open the **Extensions** panel (the stacked-blocks icon in
+   the top bar) and click **Install extension**.
+2. Paste `https://github.com/Izanagi72BB/ST-Together` and confirm.
+
+That's it. Skip to [Play](#play).
+
 ## Install: host
 
 The host needs two parts: the UI extension (installed from inside
-SillyTavern) and the server plugin (installed with one command in a
-terminal, one time only).
+SillyTavern, exactly like the guest above) and the server plugin (installed
+with one command in a terminal, one time only).
 
 ### Part 1: the UI extension
 
-1. In SillyTavern, open the Extensions panel (the stacked-blocks icon in
-   the top bar).
-2. Click **Install extension**.
-3. Paste `https://github.com/Izanagi72BB/ST-Together` and confirm.
+Open the **Extensions** panel and click **Install extension**.
+
+![The Extensions panel with the Extensions tab icon and the Install extension button marked.](docs/01-install-extension-button.png)
+
+Paste the repository URL and choose **Install just for me**.
+
+```
+https://github.com/Izanagi72BB/ST-Together
+```
+
+![The install dialog with the repository URL pasted in and "Install just for me" highlighted.](docs/02-paste-repo-url.png)
+
+SillyTavern warns that this is a third-party extension. Click
+**Yes, install it**.
+
+![The third-party extension confirmation dialog with "Yes, install it" highlighted.](docs/03-confirm-install.png)
 
 ### Part 2: the server plugin
 
-1. Find your SillyTavern folder. It is the folder that contains
-   `config.yaml`, and `Start.bat` on Windows or `start.sh` on Linux/Mac.
-   If you use the SillyTavern Launcher, it is the `SillyTavern` folder
-   inside the launcher's folder.
+**Step 1 — Find your SillyTavern folder.** It is the folder that contains
+`config.yaml`, plus `Start.bat` (Windows) or `start.sh` (Linux/Mac). If you
+use the SillyTavern Launcher, it is the `SillyTavern` folder inside the
+launcher's folder.
 
-2. Open a terminal **inside that folder**. This matters: the command in
-   step 3 creates the plugin folder relative to wherever your terminal is
-   standing, so running it from the wrong place puts the plugin in the
-   wrong place. (If that happens, delete the stray `plugins` folder it
-   created and start over from here.)
+![The SillyTavern folder open in a file manager, with config.yaml highlighted.](docs/04-find-sillytavern-folder.png)
 
-   - **Windows:** open the SillyTavern folder in File Explorer, click the
-     address bar at the top, type `cmd`, and press Enter. A terminal opens
-     already inside the folder.
-   - **Linux/Mac:** `cd /path/to/your/SillyTavern` (the prompt should show
-     the SillyTavern folder before you continue).
+**Step 2 — Open a terminal _inside that folder_.** This matters: the command
+in step 3 creates the plugin folder relative to wherever your terminal is
+standing, so running it from the wrong place puts the plugin in the wrong
+place.
 
-3. Run this command (identical on every OS):
+- **Windows:** open the SillyTavern folder in File Explorer, click the
+  address bar at the top, type `cmd`, and press Enter. A terminal opens
+  already inside the folder.
+- **Linux (KDE/Dolphin shown):** right-click empty space in the folder and
+  choose **Open Terminal Here**. Most Linux file managers have the same
+  option; on Mac, right-click the folder and choose
+  **New Terminal at Folder**.
 
-   ```
-   git clone https://github.com/Izanagi72BB/ST-Together plugins/st-together
-   ```
+![A file manager right-click menu with "Open Terminal Here" highlighted.](docs/05-open-terminal-here.png)
 
-   Windows note: if you get "git is not recognized", install
-   [Git for Windows](https://git-scm.com/download/win) first, then reopen
-   the terminal.
+**Step 3 — Clone the plugin.** Run this command (identical on every OS):
 
-4. Open `config.yaml` (same folder) in any text editor, find the line
-   `enableServerPlugins: false`, and change `false` to `true`.
+```
+git clone https://github.com/Izanagi72BB/ST-Together plugins/st-together
+```
 
-5. Restart SillyTavern fully (close the server window / process and start
-   it again, not just a browser refresh).
+![A terminal running the git clone command inside the SillyTavern folder.](docs/06-git-clone-plugin.png)
+
+_Windows note:_ if you get "git is not recognized", install
+[Git for Windows](https://git-scm.com/download/win) first, then reopen the
+terminal.
+
+**Step 4 — Confirm it landed in the right place.** You should now have a
+`st-together` folder inside `plugins`. Check the breadcrumb reads
+`SillyTavern > plugins`. If the folder ended up somewhere else, delete it and
+redo step 2 with the terminal in the correct folder.
+
+![The plugins folder containing the st-together folder, with the SillyTavern > plugins breadcrumb underlined.](docs/07-plugin-in-place.png)
+
+**Step 5 — Enable server plugins.** Open `config.yaml` (in the SillyTavern
+folder) in any text editor, find `enableServerPlugins: false`, and change
+`false` to `true`.
+
+![config.yaml open in an editor with enableServerPlugins set to true.](docs/08-enable-server-plugins.png)
+
+**Step 6 — Restart SillyTavern fully.** Close the server process and start it
+again (a browser refresh is not enough; the plugin only loads at server
+startup).
 
 ### Updating later
 
 Automatic or one click: SillyTavern re-pulls the server plugin on every
-server start, and the UI extension updates from the **Update** button
-under Manage extensions. You never repeat the steps above.
+server start, and the UI extension updates from the **Update** button under
+Manage extensions. You never repeat the steps above.
 
-The tunnel uses `cloudflared`. If it is installed system-wide the plugin
-uses that; otherwise the plugin downloads the binary into its own folder
-on first use.
-
-## Install: guest
-
-1. Extensions, Install extension, paste this repository URL. Done.
+The tunnel uses `cloudflared`. If it is installed system-wide the plugin uses
+that; otherwise the plugin downloads the binary into its own folder on first
+use.
 
 ## Play
 
-1. Host: open the character chat you want to play in, then open the
-   ST-Together drawer in the Extensions panel, pick Host, tick "Expose via
-   Cloudflare tunnel" (skip it for same-machine testing), Start Session.
-   Starting with the tunnel takes 30-60 seconds; the invite code appears
-   once the tunnel is verified reachable.
+1. **Host:** open the character chat you want to play in, then open the
+   ST-Together drawer in the Extensions panel, pick **Host**, tick **Expose
+   via Cloudflare tunnel** (skip it for same-machine testing), and click
+   **Start Session**. Starting with the tunnel takes 30-60 seconds; the
+   invite code appears once the tunnel is verified reachable.
 2. Send the invite code (`stg://...#token`) to your friend.
-3. Guest: open any character and a fresh chat to mirror into, pick Join in
-   the ST-Together drawer, paste the invite, Join. The host's chat syncs
-   over automatically.
-4. Play. The action bar above the input shows whose turn it is and holds
-   the Continue, Bot Reply, and Pass Turn buttons.
+3. **Guest:** open any character and a fresh chat to mirror into, pick
+   **Join** in the ST-Together drawer, paste the invite, and click **Join**.
+   The host's chat syncs over automatically.
+4. Play. The action bar above the input shows whose turn it is and holds the
+   **Continue**, **Bot Reply**, and **Pass Turn** buttons. In the screenshot
+   at the top of this page, the host (left) has the turn while the guest
+   (right) is locked with "Waiting: User's turn".
+
+## Troubleshooting
+
+**"Host" is greyed out.** The UI extension cannot reach the server plugin, so
+only Join is available. This means the server plugin from Part 2 is not
+installed or not loaded: clone it into `plugins/st-together`, set
+`enableServerPlugins: true` in `config.yaml`, and restart SillyTavern. Then
+click **Recheck**.
+
+![The ST-Together drawer with the Host option greyed out and a warning that the server plugin is not responding.](docs/troubleshoot-host-greyed-out.png)
 
 ## Notes and limitations
 
