@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -344,6 +344,9 @@ function attachUpgrade(server) {
         } catch {
             return;
         }
+        // Diagnostic: proves whether a WS upgrade actually reaches ST (vs being
+        // stripped upstream by a reverse proxy, which turns it into a plain GET).
+        console.log(`[ST-Together] upgrade received: path=${pathname} host=${request.headers.host} upgrade=${request.headers.upgrade}`);
         if (pathname !== WS_PATH) return;
         wss.handleUpgrade(request, socket, head, (ws) => {
             wss.emit('connection', ws, request);
@@ -390,6 +393,7 @@ export async function init(router) {
                 try {
                     const stPort = httpServer?.address()?.port;
                     if (!stPort) throw new Error('could not determine SillyTavern port');
+                    console.log(`[ST-Together] tunneling to SillyTavern at http://127.0.0.1:${stPort}`);
                     const bin = await findCloudflared();
                     session.tunnel = await startTunnel(bin, stPort);
                     console.log(`[ST-Together] tunnel up: ${session.tunnel.url}, waiting for DNS ...`);
