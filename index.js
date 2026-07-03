@@ -229,7 +229,6 @@ function connect(url, token, role) {
         state.turnHolder = null;
         document.body.classList.remove('stg-guest-active');
         hideTyping();
-        hideVotePrompt();
         removeGhost();
         clearParticipantsPrompt();
         applyTurnUI();
@@ -256,7 +255,6 @@ function disconnect() {
     state.myAvatarSent = false;
     document.body.classList.remove('stg-guest-active');
     hideTyping();
-    hideVotePrompt();
     removeGhost();
     clearParticipantsPrompt();
     applyTurnUI();
@@ -366,13 +364,12 @@ function onFrame(frame) {
             return;
         }
         case 'vote': {
+            console.log(`[${MOD}] vote frame received:`, frame.kind, frame.for ?? '');
             if (frame.kind === 'request') {
-                showVotePrompt(frame.name, frame.for);
+                promptVote(frame.name, frame.for);
             } else if (frame.kind === 'passed') {
-                hideVotePrompt();
                 toast('info', frame.for === 'summon' ? 'Bringing the AI in...' : 'Swiping the response...');
             } else if (frame.kind === 'failed') {
-                hideVotePrompt();
                 toast('info', `${frame.name ?? 'The other player'} voted no.`);
             }
             return;
@@ -1082,16 +1079,17 @@ function hookTyping() {
     }, true);
 }
 
-function showVotePrompt(name, forWhat) {
-    const el = document.getElementById('stg_vote_prompt');
-    if (!el) return;
-    const what = forWhat === 'summon' ? 'bring the AI in' : 'swipe this response';
-    document.getElementById('stg_vote_text').textContent = `${name} wants to ${what}`;
-    el.classList.remove('stg-hidden');
-}
-
-function hideVotePrompt() {
-    document.getElementById('stg_vote_prompt')?.classList.add('stg-hidden');
+// A vote arrived: ask via SillyTavern's native popup (reliable and prominent).
+// Disagree is last so dismissing the dialog defaults to "no".
+async function promptVote(name, forWhat) {
+    const what = forWhat === 'summon'
+        ? 'bring the AI in for a reply'
+        : 'swipe (regenerate) the last response';
+    const choice = await stgPrompt('ST-Together', `${name} wants to ${what}. Agree?`, [
+        { label: 'Agree', value: 'agree' },
+        { label: 'Disagree', value: 'disagree' },
+    ]);
+    wsSend({ t: 'vote', kind: choice === 'agree' ? 'agree' : 'disagree' });
 }
 
 function showTyping(name) {
@@ -1205,11 +1203,6 @@ function injectActionBar() {
             <div id="stg_continue" class="menu_button" title="Extend the bot's last message">Continue</div>
             <div id="stg_botreply" class="menu_button" title="Bot speaks again without a new message">Bot Reply</div>
             <div id="stg_pass" class="menu_button" title="Hand the turn to the other player">Pass Turn</div>
-        </div>
-        <div id="stg_vote_prompt" class="stg-hidden stg-vote-prompt">
-            <span id="stg_vote_text"></span>
-            <div id="stg_vote_agree" class="menu_button">Agree</div>
-            <div id="stg_vote_disagree" class="menu_button">Disagree</div>
         </div>`;
     formSheld.prepend(bar);
 
@@ -1229,14 +1222,6 @@ function injectActionBar() {
     };
     document.getElementById('stg_summon').addEventListener('click', proposeVote('summon', 'Vote sent. Waiting for the other player to bring the AI in.'));
     document.getElementById('stg_voteswipe').addEventListener('click', proposeVote('swipe', 'Vote sent. Waiting for the other player to agree.'));
-    document.getElementById('stg_vote_agree').addEventListener('click', () => {
-        wsSend({ t: 'vote', kind: 'agree' });
-        hideVotePrompt();
-    });
-    document.getElementById('stg_vote_disagree').addEventListener('click', () => {
-        wsSend({ t: 'vote', kind: 'disagree' });
-        hideVotePrompt();
-    });
 
     const typing = document.createElement('div');
     typing.id = 'stg_typing';
