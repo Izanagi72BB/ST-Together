@@ -286,7 +286,7 @@ function onFrame(frame) {
         case 'msg.user': return void onRemoteUserMessage(frame);
         case 'exec': return void onExec(frame);
         case 'gen.start': {
-            if (state.role === 'guest' && !state.mirrorPaused) showGhost();
+            if (state.role === 'guest' && !state.mirrorPaused) showGhost(frame.name);
             return;
         }
         case 'gen.token': {
@@ -436,48 +436,47 @@ async function applySnapshot(frame) {
         return;
     }
 
+    // Reconcile to match the host's snapshot ORDER exactly. A delete or edit
+    // on the host can reshuffle messages, so we rebuild the list in snapshot
+    // order (reusing existing message objects by uid to keep their local
+    // state) rather than appending missing ones to the end, which would
+    // scramble the order. The guest's own not-yet-echoed messages are kept
+    // at the end.
     const snapshotUids = new Set(snapshot.map(m => m.uid));
-    let added = 0, updated = 0, removed = 0;
-
-    // Remove host-origin messages the host no longer has (deletions).
-    // Normally this guest's own messages are kept (they may be in flight),
-    // but a fresh snapshot (host switched chats) sweeps everything synced.
-    for (let i = ctx.chat.length - 1; i >= 0; i--) {
-        const m = ctx.chat[i];
-        const tracked = m?.extra?.stg_uid && (m.extra.stg_remote || frame.fresh);
-        if (tracked && !snapshotUids.has(m.extra.stg_uid)) {
-            ctx.chat.splice(i, 1);
-            removed++;
-        }
+    const existingByUid = new Map();
+    for (const m of ctx.chat) {
+        if (m?.extra?.stg_uid) existingByUid.set(m.extra.stg_uid, m);
     }
-    // Update texts that changed (edits, swipes), add what is missing.
+    let added = 0, updated = 0;
+    const rebuilt = [];
     for (const m of snapshot) {
-        const idx = findByUid(m.uid);
-        if (idx === -1) {
-            await pushMessage({
-                name: m.name, text: m.text, isUser: m.isUser,
-                uid: m.uid, sendDate: m.sendDate, remote: true, save: false,
-            });
-            added++;
-        } else {
-            const existing = ctx.chat[idx];
-            let changed = false;
-            if (existing.mes !== m.text) {
-                existing.mes = m.text;
-                changed = true;
-            }
+        const existing = existingByUid.get(m.uid);
+        if (existing) {
+            if (existing.mes !== m.text) { existing.mes = m.text; updated++; }
             if (!existing.is_user && !existing.force_avatar && state.remoteAvatars[existing.name]) {
                 existing.force_avatar = state.remoteAvatars[existing.name];
-                changed = true;
             }
-            if (changed) updated++;
+            rebuilt.push(existing);
+        } else {
+            rebuilt.push(buildMessage({
+                name: m.name, text: m.text, isUser: m.isUser,
+                uid: m.uid, sendDate: m.sendDate, remote: true,
+            }));
+            added++;
         }
     }
+    // Keep this guest's own messages that the host hasn't echoed back yet.
+    for (const m of ctx.chat) {
+        const uid = m?.extra?.stg_uid;
+        if (uid && !m.extra.stg_remote && !snapshotUids.has(uid)) rebuilt.push(m);
+    }
+    const removed = ctx.chat.filter(m => m?.extra?.stg_remote && m.extra.stg_uid && !snapshotUids.has(m.extra.stg_uid)).length;
+    const orderChanged = rebuilt.length !== ctx.chat.length || rebuilt.some((m, i) => m !== ctx.chat[i]);
 
+    ctx.chat.length = 0;
+    ctx.chat.push(...rebuilt);
     await ctx.saveChat();
-    // A fresh snapshot (host shared a different chat) replaces everything,
-    // so always rebuild the view; otherwise only when something changed.
-    if (removed > 0 || updated > 0 || frame.fresh) {
+    if (orderChanged || added > 0 || updated > 0) {
         await redrawChat();
     }
     if (typeof frame.turn === 'string') state.turnHolder = frame.turn;
@@ -717,7 +716,9 @@ function hookHostEvents() {
 
     eventSource.on(eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => {
         if (!state.connected || state.role !== 'host' || state.sharePaused || dryRun) return;
-        wsSend({ t: 'gen.start' });
+        const ctx = getCtx();
+        const name = ctx.characters?.[ctx.characterId]?.name || ctx.name2 || 'Bot';
+        wsSend({ t: 'gen.start', name });
     });
 
     eventSource.on(eventTypes.STREAM_TOKEN_RECEIVED, (text) => {
@@ -854,21 +855,33 @@ function hideTyping() {
 
 // --------------------------------------------------- guest stream preview
 
-function showGhost() {
+let ghostName = null;
+
+// The bot's name/avatar come from the host (the guest may not have the
+// character loaded), so the streaming preview shows the right identity
+// instead of falling back to a system-looking default.
+function showGhost(name) {
     removeGhost();
     const chat = document.getElementById('chat');
     if (!chat) return;
+    ghostName = name || getCtx().name2 || 'Bot';
+    const avatar = state.remoteAvatars[ghostName];
     const ghost = document.createElement('div');
     ghost.id = 'stg_stream';
-    ghost.innerHTML = '<div class="stg-ghost-name"></div><div class="stg-ghost-text"></div>';
-    ghost.querySelector('.stg-ghost-name').textContent = getCtx().name2 || 'Bot';
+    ghost.innerHTML = `
+        ${avatar ? `<img class="stg-ghost-avatar" src="${avatar}" alt="">` : ''}
+        <div class="stg-ghost-body">
+            <div class="stg-ghost-name"></div>
+            <div class="stg-ghost-text"></div>
+        </div>`;
+    ghost.querySelector('.stg-ghost-name').textContent = ghostName;
     chat.appendChild(ghost);
     chat.scrollTop = chat.scrollHeight;
 }
 
 function updateGhost(text) {
     let ghost = document.getElementById('stg_stream');
-    if (!ghost) { showGhost(); ghost = document.getElementById('stg_stream'); }
+    if (!ghost) { showGhost(ghostName); ghost = document.getElementById('stg_stream'); }
     if (!ghost) return;
     ghost.querySelector('.stg-ghost-text').textContent = String(text ?? '');
     const chat = document.getElementById('chat');

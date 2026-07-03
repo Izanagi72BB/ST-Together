@@ -113,11 +113,26 @@
 
 /* --- guest-side streaming preview --- */
 #stg_stream {
+    display: flex;
+    gap: 10px;
     margin: 5px 10px;
     padding: 8px 12px;
     border-left: 2px solid var(--SmartThemeQuoteColor, #888);
     border-radius: 4px;
     opacity: 0.85;
+}
+
+#stg_stream .stg-ghost-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+#stg_stream .stg-ghost-body {
+    flex-grow: 1;
+    min-width: 0;
 }
 
 #stg_stream .stg-ghost-name {
