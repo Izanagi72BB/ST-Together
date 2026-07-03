@@ -143,6 +143,26 @@ use.
    at the top of this page, the host (left) has the turn while the guest
    (right) is locked with "Waiting: User's turn".
 
+## How the temporary link works
+
+When you host with **Use a temporary public link** ticked (the default),
+SillyTavern opens a Cloudflare "quick tunnel": a throwaway `trycloudflare.com`
+address that your friend's invite points at. This is what lets a friend on the
+other side of the world reach a session running on your own machine.
+
+It's designed to be safe and low-commitment:
+
+- **No account, no port forwarding, no exposed home IP.** The tunnel makes an
+  outbound connection, so you never open a port on your router.
+- **Random and temporary.** The address is randomly generated and stops
+  working the moment you end the session.
+- **Locked to your session.** Every invite carries a one-time token; without
+  it, the address does nothing.
+
+Turn it off only if your SillyTavern already has its own public address (a
+domain or reverse proxy) — then the invite just uses that address directly.
+See [Advanced: hosting SillyTavern on a public domain](#advanced-hosting-sillytavern-on-a-public-domain).
+
 ## Troubleshooting
 
 **"Host" is greyed out.** The UI extension cannot reach the server plugin, so
@@ -152,6 +172,26 @@ installed or not loaded: clone it into `plugins/st-together`, set
 click **Recheck**.
 
 ![The ST-Together drawer with the Host option greyed out and a warning that the server plugin is not responding.](docs/troubleshoot-host-greyed-out.png)
+
+### Advanced: hosting SillyTavern on a public domain
+
+Most people don't need this. The easiest way to play with a remote friend is
+to leave SillyTavern local and tick **Expose via Cloudflare tunnel**, which
+bridges the two of you with a throwaway URL and nothing to configure.
+
+If you instead serve SillyTavern from your own public domain or reverse
+proxy, the guest connects straight to it, so make sure the WebSocket path
+`/api/plugins/st-together/ws` gets through your setup:
+
+- Your reverse proxy must forward WebSocket upgrades (the `Upgrade` and
+  `Connection` headers) for that path.
+- Any auth/access layer in front of the domain (SSO, Zero Trust, IP
+  allowlists, basic auth) must let that one path through without an
+  interactive login, since a WebSocket can't complete a sign-in flow. The
+  ST-Together session token still guards the socket.
+
+The specifics depend on your stack. If you run this kind of setup you
+probably already know the drill.
 
 ## Notes and limitations
 

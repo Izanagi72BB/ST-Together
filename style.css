@@ -161,6 +161,23 @@ body.stg-guest-active .mes_edit {
     cursor: pointer;
 }
 
+.stg-tunnel-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.stg-help {
+    flex-shrink: 0;
+    opacity: 0.7;
+    text-decoration: none;
+    cursor: help;
+}
+
+.stg-help:hover {
+    opacity: 1;
+}
+
 .stg-extension-settings .menu_button.disabled {
     opacity: 0.35;
     pointer-events: none;

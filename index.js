@@ -49,7 +49,7 @@ function getCtx() {
 function settings() {
     const ctx = getCtx();
     ctx.extensionSettings[MOD] = Object.assign(
-        { role: 'guest', autoPass: false, tunnel: false, lastInvite: '' },
+        { role: 'guest', autoPass: false, tunnel: true, lastInvite: '' },
         ctx.extensionSettings[MOD] ?? {},
     );
     return ctx.extensionSettings[MOD];
@@ -1051,7 +1051,10 @@ function injectSettingsPanel() {
                 <hr>
                 <div id="stg_host_block" class="${s.role === 'host' ? '' : 'stg-hidden'}">
                     <label class="checkbox_label"><input id="stg_autopass" type="checkbox" ${s.autoPass ? 'checked' : ''}> Auto-pass turn after bot reply</label>
-                    <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Expose via Cloudflare tunnel (only if this SillyTavern is not already reachable from the internet)</label>
+                    <div class="stg-tunnel-row">
+                        <label class="checkbox_label"><input id="stg_tunnel" type="checkbox" ${s.tunnel ? 'checked' : ''}> Use a temporary public link so friends outside your network can join</label>
+                        <a href="https://github.com/Izanagi72BB/ST-Together#how-the-temporary-link-works" target="_blank" rel="noopener" class="stg-help" title="How this works and why it's safe">(?)</a>
+                    </div>
                     <div class="stg-row">
                         <div id="stg_start" class="menu_button">Start Session</div>
                         <div id="stg_stop" class="menu_button">Stop</div>
@@ -1062,7 +1065,7 @@ function injectSettingsPanel() {
                             <div id="stg_copy" class="menu_button" title="Copy invite">Copy</div>
                         </div>
                     </label>
-                    <small>If your friend can already open this SillyTavern in a browser (public domain or LAN), the invite works as-is. Tick the tunnel only for a purely local SillyTavern; it makes a temporary trycloudflare URL that dies when you stop the session.</small>
+                    <small>Leave this on unless your SillyTavern already has its own public address. The link is temporary and closes when you stop the session.</small>
                 </div>
                 <div id="stg_guest_block" class="${s.role === 'guest' ? '' : 'stg-hidden'}">
                     <label>Invite code
