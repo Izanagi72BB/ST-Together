@@ -45,6 +45,9 @@ const state = {
     turnMode: 'reply',      // 'reply' | 'round' | 'free'
     roundSent: new Set(),   // host, round mode: which roles have sent this round
     lastGenType: null,      // host: type of the in-flight generation
+    voteFor: null,          // active tally-vote target ('swipe' | 'summon')
+    voteCount: 0,
+    voteTotal: 0,
 };
 
 function getCtx() {
@@ -275,6 +278,8 @@ function onFrame(frame) {
             state.personas = {};
             state.myAvatarSent = false;
             state.roundSent.clear();
+
+            state.voteFor = null;
             if (frame.mode) state.turnMode = frame.mode;
             const currentChat = getCtx().getCurrentChatId?.() ?? null;
             if (frame.role === 'host') {
@@ -364,13 +369,20 @@ function onFrame(frame) {
             return;
         }
         case 'vote': {
-            console.log(`[${MOD}] vote frame received:`, frame.kind, frame.for ?? '');
-            if (frame.kind === 'request') {
-                promptVote(frame.name, frame.for);
+            if (frame.kind === 'count') {
+                state.voteFor = frame.for;
+                state.voteCount = frame.count;
+                state.voteTotal = frame.total;
+                updateVoteButtons();
+                const what = frame.for === 'summon' ? 'bring the AI in' : 'swipe';
+                toast('info', `${frame.name} voted to ${what} (${frame.count}/${frame.total})`);
             } else if (frame.kind === 'passed') {
-                toast('info', frame.for === 'summon' ? 'Bringing the AI in...' : 'Swiping the response...');
-            } else if (frame.kind === 'failed') {
-                toast('info', `${frame.name ?? 'The other player'} voted no.`);
+                state.voteFor = null;
+                updateVoteButtons();
+                toast('success', frame.for === 'summon' ? 'Bringing the AI in...' : 'Swiping the response...');
+            } else if (frame.kind === 'reset') {
+                state.voteFor = null;
+                updateVoteButtons();
             }
             return;
         }
@@ -1079,17 +1091,15 @@ function hookTyping() {
     }, true);
 }
 
-// A vote arrived: ask via SillyTavern's native popup (reliable and prominent).
-// Disagree is last so dismissing the dialog defaults to "no".
-async function promptVote(name, forWhat) {
-    const what = forWhat === 'summon'
-        ? 'bring the AI in for a reply'
-        : 'swipe (regenerate) the last response';
-    const choice = await stgPrompt('ST-Together', `${name} wants to ${what}. Agree?`, [
-        { label: 'Agree', value: 'agree' },
-        { label: 'Disagree', value: 'disagree' },
-    ]);
-    wsSend({ t: 'vote', kind: choice === 'agree' ? 'agree' : 'disagree' });
+// Show the live tally on the vote buttons, e.g. "Vote Swipe (1/2)".
+function updateVoteButtons() {
+    const label = (base, forKey) => (state.voteFor === forKey && state.voteTotal)
+        ? `${base} (${state.voteCount}/${state.voteTotal})`
+        : base;
+    const swipeBtn = document.getElementById('stg_voteswipe');
+    const summonBtn = document.getElementById('stg_summon');
+    if (swipeBtn) swipeBtn.textContent = label('Vote Swipe', 'swipe');
+    if (summonBtn) summonBtn.textContent = label('Summon AI', 'summon');
 }
 
 function showTyping(name) {
@@ -1179,6 +1189,7 @@ function applyTurnUI() {
     for (const id of ['stg_continue', 'stg_botreply', 'stg_pass']) {
         document.getElementById(id)?.classList.toggle('disabled', !mine);
     }
+    updateVoteButtons();
 
     if (textarea) {
         textarea.disabled = !mine;
@@ -1214,14 +1225,14 @@ function injectActionBar() {
     document.getElementById('stg_botreply').addEventListener('click', guarded('botreply'));
     document.getElementById('stg_pass').addEventListener('click', guarded('pass'));
 
-    // Votes are cooperative, so NOT turn-gated: either player can propose.
-    const proposeVote = (forWhat, waitMsg) => () => {
+    // Votes are cooperative tallies, NOT turn-gated: each player casts one and
+    // it fires when everyone has voted.
+    const castVote = (forWhat) => () => {
         if (!state.connected) return;
-        wsSend({ t: 'vote', kind: 'request', for: forWhat });
-        toast('info', waitMsg);
+        wsSend({ t: 'vote', kind: 'cast', for: forWhat });
     };
-    document.getElementById('stg_summon').addEventListener('click', proposeVote('summon', 'Vote sent. Waiting for the other player to bring the AI in.'));
-    document.getElementById('stg_voteswipe').addEventListener('click', proposeVote('swipe', 'Vote sent. Waiting for the other player to agree.'));
+    document.getElementById('stg_summon').addEventListener('click', castVote('summon'));
+    document.getElementById('stg_voteswipe').addEventListener('click', castVote('swipe'));
 
     const typing = document.createElement('div');
     typing.id = 'stg_typing';

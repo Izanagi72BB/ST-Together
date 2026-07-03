@@ -22,7 +22,7 @@ export const info = {
     description: 'Multiplayer relay: session tokens, turn referee, message sync between ST instances.',
 };
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const WS_PATH = '/api/plugins/st-together/ws';
 const MAX_GUESTS = 3;
 const AUTH_TIMEOUT_MS = 5000;
@@ -82,6 +82,15 @@ function otherRole(role) {
 function setTurn(holder, reason) {
     session.turnHolder = holder;
     broadcast({ t: 'turn', holder, reason });
+}
+
+// A pending vote is stale once the chat moves on (a new message or a
+// generation), so clear it and tell clients to reset their counters.
+function resetVote() {
+    if (session?.vote) {
+        session.vote = null;
+        broadcast({ t: 'vote', kind: 'reset' });
+    }
 }
 
 // ------------------------------------------------------------------ tunnel
@@ -266,6 +275,7 @@ function onFrame(ws, raw) {
                 // Host wrote it; relay to guests.
                 for (const g of guestClients()) send(g, frame);
             }
+            resetVote(); // a new message makes any pending vote stale
             return;
         }
         case 'action': {
@@ -303,6 +313,7 @@ function onFrame(ws, raw) {
             // Host relays generation to guests. Turn changes are host-driven
             // (via setturn), so the server no longer auto-passes here.
             if (meta.role !== 'host') return;
+            if (msg.t === 'gen.start') resetVote(); // the chat is advancing
             for (const g of guestClients()) send(g, msg);
             return;
         }
@@ -324,31 +335,23 @@ function onFrame(ws, raw) {
             return;
         }
         case 'vote': {
-            // Cooperative vote: one player proposes an action ('swipe' to
-            // regenerate, or 'summon' to bring the AI in), another must agree,
-            // then the host runs it.
-            if (msg.kind === 'request') {
-                const forWhat = ['swipe', 'summon'].includes(msg.for) ? msg.for : 'swipe';
-                const others = authedClients().filter(c => c !== ws);
-                if (!others.length) return send(ws, { t: 'error', code: 'no-peer', msg: 'No one else is here to vote.' });
-                session.vote = { byWs: ws, for: forWhat };
-                for (const c of others) send(c, { t: 'vote', kind: 'request', name: meta.name, for: forWhat });
-                return;
+            // Tally vote: each player casts a vote for an action ('swipe' to
+            // regenerate, or 'summon' to bring the AI in). When everyone has
+            // voted, the host runs it. Votes reset when the chat moves on.
+            if (msg.kind !== 'cast') return;
+            const forWhat = ['swipe', 'summon'].includes(msg.for) ? msg.for : 'swipe';
+            if (!session.vote || session.vote.for !== forWhat) {
+                session.vote = { for: forWhat, voters: new Set() };
             }
-            if (!session.vote) return;
-            if (msg.kind === 'agree') {
-                if (ws === session.vote.byWs) return; // can't agree with yourself
-                const forWhat = session.vote.for;
+            session.vote.voters.add(ws);
+            const count = session.vote.voters.size;
+            const total = authedClients().length;
+            broadcast({ t: 'vote', kind: 'count', for: forWhat, count, total, name: meta.name });
+            if (count >= total) {
                 session.vote = null;
                 broadcast({ t: 'vote', kind: 'passed', for: forWhat });
                 const h = hostClient();
                 if (h) send(h, { t: 'exec', kind: forWhat === 'summon' ? 'botreply' : 'swipe' });
-                return;
-            }
-            if (msg.kind === 'disagree' || msg.kind === 'cancel') {
-                session.vote = null;
-                broadcast({ t: 'vote', kind: 'failed', name: meta.name });
-                return;
             }
             return;
         }
@@ -394,9 +397,9 @@ wss.on('connection', (ws) => {
         }
     });
     ws.on('close', () => {
-        if (session?.vote?.byWs === ws) {
-            session.vote = null;
-            broadcast({ t: 'vote', kind: 'failed', name: ws.meta.name });
+        if (session?.vote?.voters?.delete(ws)) {
+            // A voter left; recompute so the tally can't be stuck above the count.
+            resetVote();
         }
         if (ws.meta.authed) {
             broadcast({ t: 'peer', name: ws.meta.name, role: ws.meta.role, online: false }, ws);
