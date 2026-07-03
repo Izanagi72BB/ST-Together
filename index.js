@@ -50,7 +50,7 @@ function getCtx() {
 function settings() {
     const ctx = getCtx();
     ctx.extensionSettings[MOD] = Object.assign(
-        { role: 'guest', autoPass: false, tunnel: true, announcePlayers: true, lastInvite: '' },
+        { role: 'guest', autoPass: false, tunnel: true, announcePlayers: true, sharePersonaDesc: true, lastInvite: '' },
         ctx.extensionSettings[MOD] ?? {},
     );
     return ctx.extensionSettings[MOD];
@@ -438,10 +438,12 @@ function currentPersona() {
 }
 
 // Guest: tell the host who I am so the AI can distinguish the two players.
+// The description is only shared if the guest opted in; otherwise just the name.
 function sendPersona() {
     if (state.role !== 'guest' || !state.connected) return;
     const me = currentPersona();
-    wsSend({ t: 'persona', name: me.name, description: me.description });
+    const share = settings().sharePersonaDesc;
+    wsSend({ t: 'persona', name: me.name, description: share ? me.description : '' });
 }
 
 // Host: inject a system note describing every participant, so the model
@@ -1205,11 +1207,13 @@ function injectSettingsPanel() {
                     <label>Invite code
                         <input id="stg_invite_in" class="text_pole" type="text" placeholder="https://host#token" value="${s.lastInvite.replace(/"/g, '&quot;')}">
                     </label>
+                    <label class="checkbox_label"><input id="stg_sharepersona" type="checkbox" ${s.sharePersonaDesc ? 'checked' : ''}> Share my Persona with the host's AI</label>
+                    <small>The host can't read your Persona description, but their LLM sees it so the character knows who you are (max 2000 characters). Unticked: only your Persona name is shared.</small>
                     <div class="stg-row">
                         <div id="stg_join" class="menu_button">Join</div>
                         <div id="stg_leave" class="menu_button">Leave</div>
                     </div>
-                    <small>Open the character chat you want to mirror into BEFORE joining, ideally a fresh one.</small>
+                    <small>Open a chat to mirror the session into before joining. A fresh one is safest, since it gets replaced by the host's shared chat.</small>
                 </div>
                 <hr>
                 <div>Status: <span id="stg_status">Idle.</span></div>
@@ -1231,6 +1235,11 @@ function injectSettingsPanel() {
         settings().announcePlayers = this.checked;
         saveSettings();
         updateParticipantsPrompt();
+    });
+    $('#stg_sharepersona').on('change', function () {
+        settings().sharePersonaDesc = this.checked;
+        saveSettings();
+        sendPersona(); // push the change if already in a session
     });
     $('#stg_join').on('click', guestJoin);
     $('#stg_leave').on('click', () => { disconnect(); setStatus('Left the session.'); });
